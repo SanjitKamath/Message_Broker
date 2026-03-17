@@ -1,0 +1,26 @@
+[project]
+name = "message_broker"
+version = "0.1.0"
+dependencies = [
+    "faststream[redis]>=0.5.0",
+    "pydantic>=2.0.0",
+    "structlog>=24.1.0",
+    "colorama>=0.4.6",
+]
+
+readme = "Readme.md"
+description = "General-purpose async request/response message broker wrapper using FastStream + Redis"
+requires-python = ">=3.9"
+authors = [ { name = "LYIK" } ]
+
+[project.scripts]
+mb-messager = "message_broker.cli_messager:run"
+mb-receiver = "message_broker.cli_receiver:run"
+
+[tool.setuptools]
+package-dir = { message_broker = "src" }
+packages = ["message_broker"]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
