@@ -1,3 +1,0 @@
-[console_scripts]
-mb-messager = message_broker.cli_messager:run
-mb-receiver = message_broker.cli_receiver:run
