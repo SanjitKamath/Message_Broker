@@ -1,4 +1,7 @@
-faststream[redis]>=0.5.0
-pydantic>=2.0.0
-structlog>=24.1.0
-colorama>=0.4.6
+# Install the local package plus any runtime packages not declared in the package's pyproject
+# Installing the editable package will pull the dependencies declared in
+# message_broker/pyproject.toml; we list runtime extras here that are used
+# by the code but not declared in that file.
+
+-e ./message_broker
+redis>=4.6.0
