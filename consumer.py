@@ -1,18 +1,14 @@
-"""
-Consumer example demonstrating middleware integration, serialization, and message handling.
+"""Consumer demo script.
 
-This example shows:
-  1. Consuming messages with custom middleware (logging, metrics, etc.)
-  2. Middleware hooks executing on message arrival (after_consume)
-  3. Graceful handling of deserialized payloads
-  4. Matching the same middleware setup used by the producer
+By default this runs a simple one-topic consumer for quick demos.
+Use ``--advanced`` to run the full middleware and multi-topic showcase.
 """
 
+import argparse
 import asyncio
 import json
 import logging
 import time
-from typing import Any
 
 from message_broker.src import connect
 from message_broker.src.core.interfaces import Message, Middleware
@@ -117,7 +113,7 @@ async def handle_user_events(message: Message) -> None:
 
     user_id = message.payload.get("user_id", "unknown")
     action = message.payload.get("action", "unknown")
-    logger.info(f"👤 User Event: {user_id} performed '{action}'")
+    logger.info(f"User Event: {user_id} performed '{action}'")
 
 
 async def handle_delayed_events(message: Message) -> None:
@@ -133,7 +129,7 @@ async def handle_delayed_events(message: Message) -> None:
     user_id = message.payload.get("user_id", "unknown")
     action = message.payload.get("action", "unknown")
     scheduled_for = message.metadata.get("scheduled_for", "unknown")
-    logger.info(f"⏰ Delayed Event: {user_id} / '{action}' (was scheduled for {scheduled_for})")
+    logger.info(f"Delayed Event: {user_id} / '{action}' (was scheduled for {scheduled_for})")
 
 
 async def handle_batch_events(message: Message) -> None:
@@ -148,10 +144,32 @@ async def handle_batch_events(message: Message) -> None:
 
     batch_id = message.metadata.get("batch_id", "unknown")
     index = message.payload.get("index", "?")
-    logger.info(f"📦 Batch Event: batch_id={batch_id}, item_index={index}")
+    logger.info(f"Batch Event: batch_id={batch_id}, item_index={index}")
 
 
-async def main() -> None:
+async def handle_simple_demo(message: Message) -> None:
+    """Print a message from the simple demo topic."""
+
+    logger.info(f"Simple demo received on 'demo_events': {message.payload}")
+
+
+async def run_simple_demo() -> None:
+    """Run a minimal consumer demo for a single topic."""
+
+    async with await connect("redis://localhost:6379/0") as broker:
+        subscriber = broker.get_subscriber()
+        logger.info("Simple consumer subscribed to 'demo_events'. Press Ctrl+C to stop.")
+        await subscriber.subscribe("demo_events", handle_simple_demo)
+
+        stop_event = asyncio.Event()
+        try:
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            logger.info("Shutting down simple consumer...")
+            raise
+
+
+async def run_advanced_demo() -> None:
     """Initialize broker with middleware and consume from multiple topics."""
 
     # Create a broker with the same middleware setup as the producer
@@ -190,7 +208,15 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Message broker consumer demo")
+    parser.add_argument(
+        "--advanced",
+        action="store_true",
+        help="Run the advanced consumer demo with middleware and multi-topic handlers",
+    )
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(run_advanced_demo() if args.advanced else run_simple_demo())
     except KeyboardInterrupt:
         logger.info("Consumer stopped.")

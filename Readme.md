@@ -37,6 +37,33 @@ Transport implementations (each fully decoupled):
 - **`producer.py`** - Publishes a message via `BrokerContext` + `BrokerRegistry`
 - **`consumer.py`** - Subscribes and processes messages with async handler
 
+### Demo Modes
+
+The top-level demo scripts now support two modes:
+
+- **Simple mode (default)** - Minimal producer/consumer flow for quick demos
+- **Advanced mode (`--advanced`)** - Full middleware, validation, metrics, and multi-topic showcase
+
+Run simple demo:
+
+```powershell
+# Terminal 1
+python consumer.py
+
+# Terminal 2
+python producer.py
+```
+
+Run advanced demo:
+
+```powershell
+# Terminal 1
+python consumer.py --advanced
+
+# Terminal 2
+python producer.py --advanced
+```
+
 ## Quick Start
 
 ### Installation

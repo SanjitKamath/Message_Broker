@@ -1,18 +1,14 @@
-"""
-Producer example demonstrating middleware, serialization swapping, and delivery scheduling.
+"""Producer demo script.
 
-This example shows:
-  1. Custom middleware that logs message usage and validates payloads
-  2. Creating brokers with custom serializers (if desired)
-  3. Publishing messages with explicit delivery_at scheduling (Redis only)
-  4. Publishing without scheduling for immediate consumption
+By default this runs a simple one-message producer for quick demos.
+Use ``--advanced`` to run the full middleware/scheduling showcase.
 """
 
+import argparse
 import asyncio
 import json
 import logging
 import time
-from typing import Any
 
 from message_broker.src import connect
 from message_broker.src.core.interfaces import Message, Middleware, BrokerCapability
@@ -101,7 +97,26 @@ class ValidationMiddleware(Middleware):
         return message
 
 
-async def main() -> None:
+async def run_simple_demo() -> None:
+    """Run a minimal producer demo with a single immediate message."""
+
+    async with await connect("redis://localhost:6379/0") as broker:
+        publisher = broker.get_publisher()
+        await publisher.publish(
+            topic="demo_events",
+            message=Message(
+                payload={
+                    "demo": True,
+                    "event": "hello_from_simple_producer",
+                    "timestamp": time.time(),
+                },
+                headers={"x-demo": "simple"},
+            ),
+        )
+        logger.info("Simple demo message published to topic 'demo_events'.")
+
+
+async def run_advanced_demo() -> None:
     """Demonstrate publishing with middleware, scheduling, and namespaced options."""
 
     # Create a broker with custom middlewares (they will be called in order)
@@ -201,4 +216,12 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Message broker producer demo")
+    parser.add_argument(
+        "--advanced",
+        action="store_true",
+        help="Run the advanced producer demo with middleware and scheduling",
+    )
+    args = parser.parse_args()
+
+    asyncio.run(run_advanced_demo() if args.advanced else run_simple_demo())
