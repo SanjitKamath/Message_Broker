@@ -1,3 +1,10 @@
+"""
+This code is the entry point for the MessageBroker class, which provides a high-level abstraction for building message-driven applications on top of various broker 
+adapters (like Redis or Kafka). The MessageBroker class manages the connection to the broker, allows users to register message handlers and reply handlers, and handles 
+the publishing and consuming of messages in a transport-agnostic way. It also includes features like retry logic, processing timeouts, and dead-letter queue handling to 
+make it robust for real-world applications. The code is designed to be flexible and extensible, allowing users to focus on their business logic while the MessageBroker 
+takes care of the underlying mechanics of message handling.
+"""
 import asyncio
 import time
 import uuid
@@ -13,11 +20,11 @@ from .core.registry import BrokerRegistry
 from .schema import DataPacket, Payload, ResponsePacket
 
 
-HandlerResult = TypeVar("HandlerResult")
-MaybeAwaitable: TypeAlias = HandlerResult | Awaitable[HandlerResult]
-OnMessageHandler: TypeAlias = Callable[[DataPacket], MaybeAwaitable[Payload | None]]
-OnReplyHandler: TypeAlias = Callable[[ResponsePacket], MaybeAwaitable[None]]
-OnMessageDecorator: TypeAlias = Callable[[OnMessageHandler], Callable[[Message], Awaitable[None]]]
+HandlerResult = TypeVar("HandlerResult") # Creates a generic placeholder type for whatever a user's function might return.
+MaybeAwaitable: TypeAlias = HandlerResult | Awaitable[HandlerResult] # This is what allows developers to write both def handler() and async def handler() seamlessly.
+OnMessageHandler: TypeAlias = Callable[[DataPacket], MaybeAwaitable[Payload | None]] # Defines the signature of a user's message handler.
+OnReplyHandler: TypeAlias = Callable[[ResponsePacket], MaybeAwaitable[None]] # It takes a ResponsePacket and returns nothing
+OnMessageDecorator: TypeAlias = Callable[[OnMessageHandler], Callable[[Message], Awaitable[None]]] # This takes a user's handler and wrap it in a function that the underlying adapter understands
 OnReplyDecorator: TypeAlias = Callable[[OnReplyHandler], Callable[[Message], Awaitable[None]]]
 
 
@@ -42,13 +49,13 @@ class MessageBroker:
         self,
         connection_uri: str,
         queue_name: str = "default_queue",
-        **context_options: object,
+        **context_options: object, # A "catch-all" for any extra keyword arguments (like max_retries=5 or middlewares=[...])
     ) -> None:
-        self.log = get_logger(self.__class__.__name__)
-        self.context = BrokerContext(connection_uri, **context_options)
-        self.broker = BrokerRegistry.create(self.context)
+        self.log = get_logger(self.__class__.__name__) # Initializes a structured logger specifically named "MessageBroker"
+        self.context = BrokerContext(connection_uri, **context_options) # Takes the raw URI and extra options and feeds them into
+        self.broker = BrokerRegistry.create(self.context) # Uses the context to figure out which adapter to instantiate (like RedisBroker or KafkaBroker) based on the URI scheme and options
 
-        self.queue_name = queue_name
+        self.queue_name = queue_name # Saves the target queue name
         self.reply_queue = f"reply_queue_{uuid.uuid4().hex}"
 
         self._publisher = None
@@ -58,17 +65,17 @@ class MessageBroker:
         self._message_wrapper: Callable[[Message], Awaitable[None]] | None = None
         self._reply_wrapper: Callable[[Message], Awaitable[None]] | None = None
 
-        self._run_task: asyncio.Task[None] | None = None
-        self._active_handler_tasks: set[asyncio.Task[object]] = set()
-        self._pending_replies: dict[str, asyncio.Future[ResponsePacket]] = {}
+        self._run_task: asyncio.Task[None] | None = None # Will hold the main infinite loop that keeps the broker alive.
+        self._active_handler_tasks: set[asyncio.Task[object]] = set() # Handles graceful shitdowns
+        self._pending_replies: dict[str, asyncio.Future[ResponsePacket]] = {} # A dictionary that maps a correlation_id to an asyncio.Future
 
-        observers = self.context.options.get("observers", [])
+        observers = self.context.options.get("observers", []) # Extracts any observers from the context
         self._observers = list(observers) if isinstance(observers, list) else []
 
     async def connect(self) -> None:
         """Connect the underlying adapter and prepare pub/sub primitives."""
 
-        await self.broker.connect()
+        await self.broker.connect() # Establishes a TCP connection with the underlying adapter's server (like Redis or Kafka)
         self._publisher = self.broker.get_publisher()
         self._subscriber = self.broker.get_subscriber()
 
@@ -97,7 +104,7 @@ class MessageBroker:
                 waiter.cancel()
             self._pending_replies.pop(correlation_id, None)
 
-        await self.broker.disconnect()
+        await self.broker.disconnect() # Tells the underlying adapter to clear its connection pool and shutdown any inernal workers
 
     async def send_message(
         self,
@@ -129,8 +136,8 @@ class MessageBroker:
         return await self._build_and_publish_packet(
             content=content,
             sender=sender,
-            reply_to=reply_to,
-            deliver_at=deliver_at,
+            reply_to=reply_to, # If the user set reply=True, it grabs the unique reply_queue_a1b2... string we generated in the __init__
+            deliver_at=deliver_at, # If the user provided a datetime for delayed delivery, it will be passed down to the adapter to handle scheduling. If not, the message will be published immediately.
         )
 
     async def send_and_wait(
@@ -162,7 +169,8 @@ class MessageBroker:
 
         if self._subscriber is None:
             raise RuntimeError("Call connect() before send_and_wait().")
-
+        
+        # This block ensures the broker is actively listening to its temporary reply_queue
         if self._reply_wrapper is None:
             if self._reply_handler is None:
                 async def _noop_reply(_resp: ResponsePacket) -> None:
@@ -178,28 +186,30 @@ class MessageBroker:
         self._pending_replies[correlation_id] = waiter
 
         try:
+            # Sends the message out to Redis/Kafka.
             await self._build_and_publish_packet(
                 content=content,
                 sender=sender,
-                reply_to=self.reply_queue,
+                reply_to=self.reply_queue, 
                 deliver_at=deliver_at,
                 correlation_id=correlation_id,
             )
-            return await asyncio.wait_for(waiter, timeout=timeout)
+            return await asyncio.wait_for(waiter, timeout=timeout) # Waits for the future to be set with a response that has the same correlation_id. If the timeout is reached before that happens, it raises a TimeoutError.
         except asyncio.TimeoutError:
             raise TimeoutError(
                 f"Timed out waiting for response correlation_id={correlation_id}"
             )
         finally:
-            self._pending_replies.pop(correlation_id, None)
+            self._pending_replies.pop(correlation_id, None) # This guarantees we delete the waiter box from memory
 
+    # The following methods are responsible for taking user-defined handlers and wrapping them in a way that the underlying adapter can call when messages arrive. This is where we bridge the gap between the transport-specific Message objects and the user's business logic that operates on DataPacket and ResponsePacket.
     def _make_message_wrapper(
         self,
         user_handler: OnMessageHandler,
     ) -> Callable[[Message], Awaitable[None]]:
         """Build and cache adapter-facing message wrapper once per registration."""
 
-        async def wrapper(msg: Message) -> None:
+        async def wrapper(msg: Message) -> None: # This is the actual function that Redis/Kafka will call when a message arrives.
             data: DataPacket | None = None
             try:
                 data = DataPacket(**msg.payload)
@@ -217,6 +227,13 @@ class MessageBroker:
                 while True:
                     started = time.perf_counter()
                     status = "processed"
+                    """
+                    Try block for handler execution: We attempt to execute the user's handler function with the parsed DataPacket. 
+                    If the handler executes successfully within the allowed processing time, we proceed to notify observers and publish 
+                    a response if needed. However, if the handler raises an exception or exceeds the processing timeout, we catch that 
+                    and enter the retry logic. This structure allows us to handle both expected and unexpected errors gracefully while 
+                    providing hooks for observability and response handling.
+                    """
                     try:
                         handler_result = user_handler(data)
                         if timeout_ms is not None:
@@ -225,7 +242,7 @@ class MessageBroker:
                                 timeout=timeout_ms / 1000.0,
                             )
                         else:
-                            handler_result = await self._resolve_result(handler_result)
+                            handler_result = await self._resolve_result(handler_result) # Checks if the user wrote def or async def and safely awaits it either way
 
                         elapsed_ms = (time.perf_counter() - started) * 1000.0
                         await self._notify_handler(
@@ -251,6 +268,10 @@ class MessageBroker:
                                 correlation_id=data.correlation_id,
                             )
                         return
+                    
+                    # Error handling and retry logic: If the handler raises an exception or if it exceeds the specified processing timeout, we catch that 
+                    # and decide whether to retry based on the max_retries configuration. If we exhaust all retries, we publish a failure response (if reply_to is set) 
+                    # and/or send the original message to a dead-letter queue for later inspection.
                     except asyncio.TimeoutError as exc:
                         status = "timeout"
                         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -277,6 +298,8 @@ class MessageBroker:
                             retries=attempt,
                         )
                         return
+                    
+                    # Error handling for exceptions raised by the handler itself (not just timeouts)
                     except Exception as exc:
                         status = "failed"
                         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -303,6 +326,9 @@ class MessageBroker:
                             retries=attempt,
                         )
                         return
+            
+            # Error handling for issues that occur during message parsing or before the handler is even called. Since we might not have a valid DataPacket 
+            # (if parsing fails), we can't rely on correlation_id or reply_to, so we just log the error and attempt to publish to the DLQ if possible.
             except Exception as exc:
                 pkt_id = getattr(data, "id", None)
                 corr = getattr(data, "correlation_id", None)
@@ -320,6 +346,11 @@ class MessageBroker:
 
         return wrapper
 
+    """
+    This function allows users to register their message handler functions in a flexible way. They can either use it as a decorator (e.g., @broker.on_message) or
+    call it directly with their handler function. The method takes care of wrapping the user's handler in a function that the underlying adapter can call when messages 
+    arrive, and it also caches this wrapper for efficiency. This design abstracts away the transport-specific details and lets users focus on their business logic.
+    """
     def on_message(
         self,
         handler: OnMessageHandler | None = None,
@@ -353,6 +384,10 @@ class MessageBroker:
         self._message_wrapper = self._make_message_wrapper(handler)
         return self._message_wrapper
 
+    """
+    This function is similar to on_message but for reply handlers. It allows users to register a function that will be called when a response is 
+    received on the reply queue.
+    """
     def _make_reply_wrapper(
         self,
         user_handler: OnReplyHandler,
@@ -495,6 +530,12 @@ class MessageBroker:
         finally:
             await self.disconnect()
 
+    """
+    This function checks if the result returned by the user's handler is an awaitable (i.e., if the user defined their handler with async def). 
+    If it is awaitable, we create a task for it and add it to the set of active handler tasks for tracking. We then await the task to get the 
+    final result. If it's not awaitable, we simply return it as is. This allows users to write both synchronous and asynchronous handlers without 
+    worrying about the underlying mechanics of awaiting.
+    """
     async def _resolve_result(self, maybe_result: MaybeAwaitable[Payload | None]) -> Payload | None:
         if isawaitable(maybe_result):
             task = asyncio.create_task(cast(Awaitable[Payload | None], maybe_result))
@@ -503,6 +544,11 @@ class MessageBroker:
             return await task
         return cast(Payload | None, maybe_result)
 
+    """
+    This function checks if there's a max_retries configuration specified for the message handler, either in the message metadata or 
+    in the broker's context options. It returns the maximum number of retries allowed for that handler, defaulting to 0 if not configured 
+    or if the value is invalid. This allows for flexible retry strategies on a per-message basis while also providing a global default.
+    """
     def _resolve_handler_max_retries(self, message: Message) -> int:
         configured = message.metadata.get("handler_max_retries")
         if configured is None:
@@ -511,6 +557,12 @@ class MessageBroker:
             return 0
         return configured
 
+    """
+    This function checks if there's a processing timeout specified for the message handler, either in the message metadata or 
+    in the broker's context options. If a valid timeout is found (a positive integer), it returns that value in milliseconds. 
+    If not, it returns None, indicating that there is no processing timeout and the handler can run indefinitely until it finishes 
+    or raises an exception.
+    """
     def _resolve_processing_timeout_ms(self, message: Message) -> int | None:
         configured = message.metadata.get("processing_timeout_ms")
         if configured is None:
@@ -521,6 +573,12 @@ class MessageBroker:
             return None
         return configured
 
+    """
+    This function is responsible for determining the appropriate dead-letter queue (DLQ) topic based on the source topic of 
+    the message and the broker's configuration. It first checks if there is a specific DLQ topic configured for the source 
+    topic in the "dlq_topics" dictionary. If not, it falls back to a default DLQ topic specified by "default_dlq_topic". 
+    If neither is properly configured, it returns None, indicating that there is no DLQ to publish to.
+    """
     def _resolve_dlq_topic(self, source_topic: str) -> str | None:
         dlq_topics = self.context.options.get("dlq_topics", {})
         if isinstance(dlq_topics, dict):
@@ -532,6 +590,12 @@ class MessageBroker:
             return fallback
         return None
 
+    """
+    This function is responsible for publishing a standardized failure response back to the reply_to queue (if it exists) 
+    when a handler fails after exhausting all retries. It constructs a ResponsePacket with status "failed" and includes 
+    the error message in the content. This allows the original requester to receive structured information about the failure 
+    instead of just timing out.
+    """
     async def _publish_failure_response(self, packet: DataPacket | None, error: str) -> None:
         if packet is None or not packet.reply_to:
             return
@@ -546,6 +610,12 @@ class MessageBroker:
             Message(payload=failed.model_dump()),
         )
 
+    """
+    This function is called when we've exhausted all retry attempts for a given message handler and are about to give up on processing 
+    that message. It attempts to publish the original message along with error details to a dead-letter queue (DLQ) for later inspection. 
+    The DLQ topic is determined based on the source topic of the message and the broker's configuration. This allows developers to analyze 
+    failed messages and understand why they couldn't be processed successfully.
+    """
     async def _publish_to_dlq(
         self,
         *,
@@ -583,6 +653,10 @@ class MessageBroker:
         )
         await self._publisher.publish(dlq_topic, dlq_message)
 
+    """
+    This method is called after a message is published to notify any observers about the publish event, including the topic, 
+    time taken to publish, and the original message.
+    """
     async def _notify_publish(self, *, topic: str, elapsed_ms: float, message: Message) -> None:
         for observer in self._observers:
             callback = getattr(observer, "on_publish", None)
@@ -592,6 +666,10 @@ class MessageBroker:
             if isawaitable(result):
                 await result
 
+    """
+    This method is called after a handler finishes processing (whether successfully or with an error) to notify 
+    any observers about the outcome, including the topic, processing time, original message, and status.
+    """
     async def _notify_handler(
         self,
         *,
@@ -613,6 +691,13 @@ class MessageBroker:
             if isawaitable(result):
                 await result
 
+    """
+    This method is called when a handler raises an exception or exceeds its processing timeout, 
+    and we are about to retry the operation. It notifies observers about the retry attempt, including 
+    which operation is being retried (like "handler"), the current attempt number, the maximum retries 
+    allowed, and the error that caused the retry. This allows for centralized logging, alerting, or 
+    even dynamic adjustment of retry strategies based on observed failures.
+    """
     async def _notify_retry(
         self,
         *,

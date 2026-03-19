@@ -41,6 +41,7 @@ class BrokerContext:
         password: Optional decoded URI password.
         virtual_host: URI path with leading slash removed when present.
         options: Immutable merged option mapping.
+        timeout: Connection and operation timeout in milliseconds.
 
     Example:
         context = BrokerContext("redis://localhost:6379/0", timeout=3000)
@@ -148,6 +149,11 @@ class BrokerContext:
         # Initialize middlewares (empty list if not provided)
         self.middlewares = middlewares if middlewares is not None else []
 
+    """
+    This class method is responsible for normalizing the broker name based on the URI scheme. It maps common scheme variants to a 
+    canonical broker identifier, which allows the rest of the code to refer to brokers in a consistent way regardless of the specific 
+    URI format used by the caller.
+    """
     @staticmethod
     def _normalize_broker_name(scheme: str) -> str:
         """Map URI scheme variants to a canonical broker identifier."""
@@ -159,6 +165,11 @@ class BrokerContext:
             return "redis"
         return normalized
 
+    """
+    This static method infers whether transport security is required based on the URI scheme. It checks for common indicators of secure schemes, such as
+    schemes that end with "s" (like amqps), or contain "+ssl" or "+tls". This allows the context to automatically determine if the connection should be secure without
+    requiring the caller to explicitly specify it.
+    """
     @staticmethod
     def _is_secure_scheme(scheme: str) -> bool:
         """Infer transport security requirement from URI scheme."""
@@ -171,6 +182,10 @@ class BrokerContext:
             or lowered in {"https", "wss"}
         )
 
+    """
+    This class method resolves the effective port number for the connection. It first checks if the URI includes an explicit port. If not, it looks up a default port
+    based on the scheme or broker name.
+    """
     @classmethod
     def _resolve_port(cls, scheme: str, broker_name: str) -> int:
         """Return a deterministic default port when URI port is missing."""
@@ -181,6 +196,11 @@ class BrokerContext:
             return cls.DEFAULT_PORTS[broker_name]
         return 0
 
+    """
+    This method parses the query string from the URI and converts it into a dictionary of options. It uses the parse_qs function to handle URL-encoded query parameters 
+    and then applies a coercion function to convert string values into appropriate Python types (like int, bool, etc.). This allows users to specify configuration 
+    options directly in the URI query string in a flexible way.
+    """
     @classmethod
     def _parse_query_options(cls, query: str) -> dict[str, JsonValue]:
         """Decode URI query values into scalar Python objects.
@@ -197,6 +217,11 @@ class BrokerContext:
             options[key] = cls._coerce_scalar(values[-1])
         return options
 
+    """
+    This static method takes a raw string value and attempts to coerce it into a more specific Python type. It handles common cases like "true"/"false" for booleans,
+    and tries to convert numeric strings into int or float. If it cannot coerce the value into a more specific type, it returns the original string. This is useful for
+    interpreting configuration options that are provided as strings (for example, from environment variables or query parameters) into their intended types.
+    """
     @staticmethod
     def _coerce_scalar(raw_value: str) -> JsonValue:
         """Convert common scalar string values to typed Python values."""
@@ -217,6 +242,11 @@ class BrokerContext:
         except ValueError:
             return value
 
+    """
+    This static method validates critical option values to ensure they meet expected criteria (like being positive integers). It raises a ConfigurationError if any 
+    of the options are invalid. This early validation helps catch misconfigurations before the broker starts processing messages, leading to more deterministic failures 
+    and easier debugging.
+    """
     @staticmethod
     def _validate_options(options: Mapping[str, JsonValue]) -> None:
         """Validate critical option values early for deterministic failures.
@@ -248,6 +278,12 @@ class BrokerContext:
                 "Option 'handler_max_retries' must be greater than or equal to zero."
             )
 
+    """
+    This method is responsible for extracting a configuration object from the keyword arguments passed to the BrokerContext constructor. 
+    It looks for a "config" key in the kwargs, and if it finds one, it attempts to normalize it into a plain dictionary. This allows users 
+    to pass in configuration using various formats (like Pydantic models or other mapping-like objects) while ensuring that the BrokerContext 
+    can work with it in a consistent way.
+    """
     @classmethod
     def _extract_config_options(cls, kwargs: dict[str, Any]) -> dict[str, JsonValue]:
         """Pop optional config object and normalize it to a plain dict."""
@@ -271,6 +307,11 @@ class BrokerContext:
 
         raise ConfigurationError("Option 'config' must be a mapping-like object.")
 
+    """ 
+    This class method loads optional overrides from environment variables. It supports both global and broker-specific forms, allowing users to specify configuration
+    options in the environment that can override defaults and URI query parameters. The method checks for environment variables in the format of "MB_{OPTION}" for global 
+    overrides, and "MB_{BROKER}_{OPTION}" for broker-specific overrides, where {OPTION} is the uppercase name of the option and {BROKER} is the uppercase name of the broker. 
+    It then coerces the raw string values from the environment into appropriate Python types using the _coerce_scalar method"""
     @classmethod
     def _load_env_overrides(cls, broker_name: str) -> dict[str, JsonValue]:
         """Load optional overrides from environment variables.

@@ -9,7 +9,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-
+"""
+This class serves as the base exception type for all errors related to the message broker. It includes optional attributes for the broker name, 
+the operation being performed, and any additional details that may be useful for diagnostics. By providing a common base class, it allows users 
+of the package to catch all broker-related errors in a consistent way, while still allowing for more specific error types to be defined for 
+different failure scenarios.
+"""
 class MessageBrokerError(Exception):
     """Base type for all broker-related failures.
 

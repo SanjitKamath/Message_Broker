@@ -16,7 +16,11 @@ from .interfaces import Broker
 
 BrokerFactory = Callable[[BrokerContext], Broker]
 
-
+"""
+This class serves as a central registry for broker adapter factory functions. Adapters can self-register by name, allowing the core package to create broker instances
+dynamically at runtime based on configuration. The registry also includes a plugin discovery mechanism that looks for adapter factories exposed via setuptools entry points, 
+enabling a flexible and extensible architecture for supporting multiple broker implementations without coupling the core to specific transports.
+"""
 class BrokerRegistry:
     """Stores and resolves broker adapter factory functions.
 
@@ -27,6 +31,9 @@ class BrokerRegistry:
     _factories: ClassVar[dict[str, BrokerFactory]] = {}
     _plugins_loaded: ClassVar[bool] = False
 
+    """
+    Register a broker factory under a normalized name.
+    """
     @classmethod
     def register(cls, name: str, factory: BrokerFactory) -> None:
         """Register a broker factory under a normalized name.
@@ -50,6 +57,11 @@ class BrokerRegistry:
 
         cls._factories[normalized_name] = factory
 
+    """
+    Create a broker instance for the provided context. This method first ensures that plugins have been discovered, then looks up the appropriate factory 
+    based on the broker name in the context. If a factory is found, it is called with the context to create and return a broker instance. If no factory is 
+    registered for the broker name, a ConfigurationError is raised with a message that includes the list of available adapters for easier debugging.
+    """
     @classmethod
     def create(cls, context: BrokerContext) -> Broker:
         """Create a broker instance for the provided context.
@@ -77,6 +89,12 @@ class BrokerRegistry:
 
         return factory(context)
 
+    """
+    This function discovers adapter factories from setuptools entry points. It looks for entry points in the "message_broker.adapters" group and attempts to load them. 
+    Each entry point is expected to be a callable that returns a BrokerFactory or a Broker instance directly. The method normalizes the entry point names and registers 
+    valid factories in the registry. It also includes error handling to ensure that optional plugin loading does not break normal startup paths, and it avoids 
+    duplicate registrations.
+    """
     @classmethod
     def discover_plugins(cls, *, force: bool = False) -> None:
         """Discover adapter factories from setuptools entry points.
@@ -132,6 +150,9 @@ class BrokerRegistry:
 
         cls._plugins_loaded = True
 
+    """
+    Clear all registered adapters.
+    """
     @classmethod
     def clear(cls) -> None:
         """Remove all registered adapters.

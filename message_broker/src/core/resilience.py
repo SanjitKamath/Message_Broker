@@ -17,7 +17,13 @@ from .exceptions import ConnectionLostError, PublishFailedError
 P = ParamSpec("P")
 R = TypeVar("R")
 
-
+"""
+This function is a decorator factory that creates a decorator to apply retry behavior to broker operations. It takes two parameters: max_retries, 
+which specifies the number of retry attempts after the initial failure, and base_delay, which specifies the initial delay in seconds before the first retry. 
+The decorator wraps a callable and implements an exponential backoff strategy for retries when a ConnectionLostError is caught. If the maximum number of 
+retries is exceeded, it raises a PublishFailedError with details about the operation and retry configuration. The decorator also includes optional observability 
+callbacks that can be triggered on each retry attempt if observers are configured in the context.
+"""
 def with_retries(
     *,
     max_retries: int,
@@ -46,6 +52,11 @@ def with_retries(
     if base_delay <= 0:
         raise ValueError("base_delay must be greater than zero.")
 
+    """
+    This function is the actual decorator that will be applied to the target callable. It wraps the original function and implements the retry logic. 
+    The wrapper function attempts to execute the wrapped function and catches ConnectionLostError exceptions. If such an exception is caught, it checks
+    if the maximum number of retries has been exceeded.
+    """
     def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         """Decorate a callable with retry/backoff behavior."""
 

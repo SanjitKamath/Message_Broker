@@ -1,3 +1,9 @@
+"""
+This module defines the core data models used for message exchange in the MessageBroker system. It includes the DataPacket and ResponsePacket classes, 
+which serve as the standard envelopes for messages sent through the broker. The DataPacket is used for incoming messages that handlers will process, 
+while the ResponsePacket is used for outgoing responses that handlers can publish back to a reply queue. Both classes are designed to be flexible and 
+accommodate a wide range of payloads while also providing important metadata for tracking and correlation.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
