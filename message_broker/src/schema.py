@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional, TypeAlias
+from typing import Any, TypeAlias
 import uuid
 
 from pydantic import BaseModel, Field
 
 
-# Payload is a JSON-like payload used throughout the package. Using `Any`
-# here avoids recursive TypeAlias handling issues when Pydantic generates
-# schemas. Consumers should prefer passing JSON-serializable structures.
-Payload: TypeAlias = Any
+# JSON-like payload used throughout the package.
+#
+# The alias intentionally allows Any for dict/list elements to avoid
+# over-constraining dynamic payloads while still communicating the expected
+# shape to type checkers.
+Payload: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 
 def _utc_now() -> datetime:
@@ -33,8 +35,8 @@ class DataPacket(BaseModel):
     sender: str = Field(..., min_length=3, description="Producer name or service identifier")
     content: Payload = Field(..., description="JSON-like message payload")
     correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Correlation ID for responses")
-    reply_to: Optional[str] = Field(None, description="Reply queue name where producer listens for responses")
-    deliver_at: Optional[datetime] = Field(None, description="UTC datetime for scheduled delivery")
+    reply_to: str | None = Field(None, description="Reply queue name where producer listens for responses")
+    deliver_at: datetime | None = Field(None, description="UTC datetime for scheduled delivery")
 
 
 class ResponsePacket(BaseModel):
@@ -51,5 +53,5 @@ class ResponsePacket(BaseModel):
     correlation_id: str = Field(..., description="Correlation id copied from original message")
     in_response_to: str = Field(..., description="Original DataPacket.id")
     status: str = Field(..., description="Processing status or short response")
-    content: Optional[Payload] = Field(default=None, description="JSON-like response payload")
+    content: Payload = Field(default=None, description="JSON-like response payload")
     processed_at: datetime = Field(default_factory=_utc_now, description="UTC time when response was created")

@@ -1,186 +1,635 @@
 import asyncio
-import json
 import time
 import uuid
+from collections.abc import Awaitable
 from datetime import datetime
-from typing import Awaitable, Callable, Optional, TypeVar, Union
+from inspect import isawaitable
+from typing import Callable, TypeAlias, TypeVar, cast
 
-import redis.asyncio as aioredis
-from faststream import FastStream
-from faststream.redis import RedisBroker
-from .schema import DataPacket, Payload, ResponsePacket
 from .app_logging import get_logger
+from .core.context import BrokerContext
+from .core.interfaces import Message
+from .core.registry import BrokerRegistry
+from .schema import DataPacket, Payload, ResponsePacket
 
 
 HandlerResult = TypeVar("HandlerResult")
-MaybeAwaitable = Union[HandlerResult, Awaitable[HandlerResult]]
+MaybeAwaitable: TypeAlias = HandlerResult | Awaitable[HandlerResult]
+OnMessageHandler: TypeAlias = Callable[[DataPacket], MaybeAwaitable[Payload | None]]
+OnReplyHandler: TypeAlias = Callable[[ResponsePacket], MaybeAwaitable[None]]
+OnMessageDecorator: TypeAlias = Callable[[OnMessageHandler], Callable[[Message], Awaitable[None]]]
+OnReplyDecorator: TypeAlias = Callable[[OnReplyHandler], Callable[[Message], Awaitable[None]]]
+
 
 class MessageBroker:
-    """General-purpose request/response broker wrapper over Redis + FastStream.
+    """High-level request/response wrapper built on top of broker adapters.
 
-    Parameters:
-    - `redis_url`: Redis connection URL, for example `redis://127.0.0.1:6379`.
-    - `queue_name`: Queue used to consume incoming requests.
+    This class keeps business handlers transport-neutral while exposing a small
+    ergonomic API for publish/subscribe and RPC-style request/response.
+
+    Example:
+        broker = MessageBroker("redis://localhost:6379")
+
+        @broker.on_message
+        async def handle(data: DataPacket) -> dict[str, bool]:
+            return {"ok": True}
+
+        await broker.connect()
+        await broker.start()
     """
 
-    def __init__(self, redis_url: str, queue_name: str = "default_queue"):
+    def __init__(
+        self,
+        connection_uri: str,
+        queue_name: str = "default_queue",
+        **context_options: object,
+    ) -> None:
         self.log = get_logger(self.__class__.__name__)
-        self.broker = RedisBroker(redis_url)
-        self.app = FastStream(self.broker)
+        self.context = BrokerContext(connection_uri, **context_options)
+        self.broker = BrokerRegistry.create(self.context)
+
         self.queue_name = queue_name
         self.reply_queue = f"reply_queue_{uuid.uuid4().hex}"
-        # raw redis client used for scheduling operations (ZSET)
-        # use decode_responses so members are returned as str
-        self._redis = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
-        self._scheduler_task: Optional[asyncio.Task] = None
+
+        self._publisher = None
+        self._subscriber = None
+        self._message_handler: OnMessageHandler | None = None
+        self._reply_handler: OnReplyHandler | None = None
+        self._message_wrapper: Callable[[Message], Awaitable[None]] | None = None
+        self._reply_wrapper: Callable[[Message], Awaitable[None]] | None = None
+
+        self._run_task: asyncio.Task[None] | None = None
+        self._active_handler_tasks: set[asyncio.Task[object]] = set()
+        self._pending_replies: dict[str, asyncio.Future[ResponsePacket]] = {}
+
+        observers = self.context.options.get("observers", [])
+        self._observers = list(observers) if isinstance(observers, list) else []
+
+    async def connect(self) -> None:
+        """Connect the underlying adapter and prepare pub/sub primitives."""
+
+        await self.broker.connect()
+        self._publisher = self.broker.get_publisher()
+        self._subscriber = self.broker.get_subscriber()
+
+    async def disconnect(self) -> None:
+        """Gracefully stop tasks, resolve waiters, and release broker resources."""
+
+        current = asyncio.current_task()
+        if self._run_task is not None and self._run_task is not current:
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._run_task = None
+
+        for task in list(self._active_handler_tasks):
+            task.cancel()
+
+        if self._active_handler_tasks:
+            await asyncio.gather(*self._active_handler_tasks, return_exceptions=True)
+        self._active_handler_tasks.clear()
+
+        for correlation_id, waiter in list(self._pending_replies.items()):
+            if not waiter.done():
+                waiter.cancel()
+            self._pending_replies.pop(correlation_id, None)
+
+        await self.broker.disconnect()
 
     async def send_message(
         self,
         content: Payload,
         sender: str,
         reply: bool = False,
-        deliver_at: Optional["datetime"] = None,
+        deliver_at: datetime | None = None,
     ) -> str:
-        """Send a request packet to the configured queue.
+        """Publish an application payload and optionally request a reply.
 
-        Parameters:
-        - `content`: JSON-like payload to process.
-        - `sender`: Producer/service name.
-        - `reply`: If true, attach this broker instance's reply queue.
+        Args:
+            content: JSON-like payload to publish.
+            sender: Logical sender/service name.
+            reply: When True, includes an auto-generated reply queue.
+            deliver_at: Optional UTC datetime for delayed delivery.
 
         Returns:
-        - Correlation ID for tracking response packets.
+            Correlation ID for tracking the published request.
+
+        Example:
+            correlation_id = await broker.send_message(
+                content={"task": "sync"},
+                sender="worker-api",
+                reply=True,
+            )
         """
+
         reply_to = self.reply_queue if reply else None
+        return await self._build_and_publish_packet(
+            content=content,
+            sender=sender,
+            reply_to=reply_to,
+            deliver_at=deliver_at,
+        )
+
+    async def send_and_wait(
+        self,
+        content: Payload,
+        sender: str,
+        *,
+        timeout: float | None = None,
+        deliver_at: datetime | None = None,
+    ) -> ResponsePacket:
+        """Send a request and wait for the correlated response.
+
+        Args:
+            content: JSON-like payload to publish.
+            sender: Logical sender/service name.
+            timeout: Max wait time in seconds for the response.
+            deliver_at: Optional UTC datetime for delayed delivery.
+
+        Returns:
+            A response packet with matching correlation ID.
+
+        Example:
+            response = await broker.send_and_wait(
+                content={"task": "healthcheck"},
+                sender="cli",
+                timeout=3.0,
+            )
+        """
+
+        if self._subscriber is None:
+            raise RuntimeError("Call connect() before send_and_wait().")
+
+        if self._reply_wrapper is None:
+            if self._reply_handler is None:
+                async def _noop_reply(_resp: ResponsePacket) -> None:
+                    self.log.debug("No reply handler registered; using RPC waiter only")
+
+                self._reply_handler = _noop_reply
+            self._reply_wrapper = self._make_reply_wrapper(self._reply_handler)
+            await self._subscriber.subscribe(self.reply_queue, self._reply_wrapper)
+
+        correlation_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[ResponsePacket] = loop.create_future()
+        self._pending_replies[correlation_id] = waiter
+
+        try:
+            await self._build_and_publish_packet(
+                content=content,
+                sender=sender,
+                reply_to=self.reply_queue,
+                deliver_at=deliver_at,
+                correlation_id=correlation_id,
+            )
+            return await asyncio.wait_for(waiter, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Timed out waiting for response correlation_id={correlation_id}"
+            )
+        finally:
+            self._pending_replies.pop(correlation_id, None)
+
+    def _make_message_wrapper(
+        self,
+        user_handler: OnMessageHandler,
+    ) -> Callable[[Message], Awaitable[None]]:
+        """Build and cache adapter-facing message wrapper once per registration."""
+
+        async def wrapper(msg: Message) -> None:
+            data: DataPacket | None = None
+            try:
+                data = DataPacket(**msg.payload)
+                self.log.info(
+                    "Message received",
+                    packet_id=data.id,
+                    correlation_id=data.correlation_id,
+                )
+
+                max_retries = self._resolve_handler_max_retries(msg)
+                timeout_ms = self._resolve_processing_timeout_ms(msg)
+                source_topic = str(msg.metadata.get("source_topic", self.queue_name))
+
+                attempt = 0
+                while True:
+                    started = time.perf_counter()
+                    status = "processed"
+                    try:
+                        handler_result = user_handler(data)
+                        if timeout_ms is not None:
+                            handler_result = await asyncio.wait_for(
+                                self._resolve_result(handler_result),
+                                timeout=timeout_ms / 1000.0,
+                            )
+                        else:
+                            handler_result = await self._resolve_result(handler_result)
+
+                        elapsed_ms = (time.perf_counter() - started) * 1000.0
+                        await self._notify_handler(
+                            topic=source_topic,
+                            elapsed_ms=elapsed_ms,
+                            message=msg,
+                            status=status,
+                        )
+
+                        if data.reply_to:
+                            response = ResponsePacket(
+                                correlation_id=data.correlation_id,
+                                in_response_to=data.id,
+                                status="processed",
+                                content=handler_result,
+                            )
+                            await self._publisher.publish(
+                                data.reply_to,
+                                Message(payload=response.model_dump()),
+                            )
+                            self.log.info(
+                                "Response published",
+                                correlation_id=data.correlation_id,
+                            )
+                        return
+                    except asyncio.TimeoutError as exc:
+                        status = "timeout"
+                        elapsed_ms = (time.perf_counter() - started) * 1000.0
+                        await self._notify_handler(
+                            topic=source_topic,
+                            elapsed_ms=elapsed_ms,
+                            message=msg,
+                            status=status,
+                        )
+                        if attempt < max_retries:
+                            attempt += 1
+                            await self._notify_retry(
+                                operation="handler",
+                                attempt=attempt,
+                                max_retries=max_retries,
+                                error=exc,
+                            )
+                            continue
+                        await self._publish_failure_response(data, str(exc))
+                        await self._publish_to_dlq(
+                            source_topic=source_topic,
+                            original_message=msg,
+                            error=exc,
+                            retries=attempt,
+                        )
+                        return
+                    except Exception as exc:
+                        status = "failed"
+                        elapsed_ms = (time.perf_counter() - started) * 1000.0
+                        await self._notify_handler(
+                            topic=source_topic,
+                            elapsed_ms=elapsed_ms,
+                            message=msg,
+                            status=status,
+                        )
+                        if attempt < max_retries:
+                            attempt += 1
+                            await self._notify_retry(
+                                operation="handler",
+                                attempt=attempt,
+                                max_retries=max_retries,
+                                error=exc,
+                            )
+                            continue
+                        await self._publish_failure_response(data, str(exc))
+                        await self._publish_to_dlq(
+                            source_topic=source_topic,
+                            original_message=msg,
+                            error=exc,
+                            retries=attempt,
+                        )
+                        return
+            except Exception as exc:
+                pkt_id = getattr(data, "id", None)
+                corr = getattr(data, "correlation_id", None)
+                self.log.exception(
+                    "Message processing failed",
+                    packet_id=pkt_id,
+                    correlation_id=corr,
+                )
+                await self._publish_to_dlq(
+                    source_topic=str(msg.metadata.get("source_topic", self.queue_name)),
+                    original_message=msg,
+                    error=exc,
+                    retries=self._resolve_handler_max_retries(msg),
+                )
+
+        return wrapper
+
+    def on_message(
+        self,
+        handler: OnMessageHandler | None = None,
+    ) -> OnMessageDecorator | Callable[[Message], Awaitable[None]]:
+        """Register a message handler.
+
+        Purpose:
+            Attach a request handler for inbound packets.
+
+        Args:
+            handler: Optional handler function. If omitted, returns a decorator.
+
+        Returns:
+            Either a decorator or an adapter-facing async wrapper.
+
+        Example:
+            @broker.on_message
+            async def handle(data: DataPacket) -> dict[str, bool]:
+                return {"ok": True}
+        """
+
+        if handler is None:
+            def decorator(fn: OnMessageHandler) -> Callable[[Message], Awaitable[None]]:
+                self._message_handler = fn
+                self._message_wrapper = self._make_message_wrapper(fn)
+                return self._message_wrapper
+
+            return cast(OnMessageDecorator, decorator)
+
+        self._message_handler = handler
+        self._message_wrapper = self._make_message_wrapper(handler)
+        return self._message_wrapper
+
+    def _make_reply_wrapper(
+        self,
+        user_handler: OnReplyHandler,
+    ) -> Callable[[Message], Awaitable[None]]:
+        """Build and cache adapter-facing reply wrapper once per registration."""
+
+        async def wrapper(msg: Message) -> None:
+            data = ResponsePacket(**msg.payload)
+
+            self.log.info("Reply received", correlation_id=data.correlation_id)
+
+            pending = self._pending_replies.get(data.correlation_id)
+            if pending is not None and not pending.done():
+                pending.set_result(data)
+
+            result = user_handler(data)
+            if isawaitable(result):
+                await result
+
+        return wrapper
+
+    async def _build_and_publish_packet(
+        self,
+        *,
+        content: Payload,
+        sender: str,
+        reply_to: str | None,
+        deliver_at: datetime | None,
+        correlation_id: str | None = None,
+    ) -> str:
+        """Build the transport message envelope and publish it.
+
+        Args:
+            content: JSON-like payload to publish.
+            sender: Logical sender/service name.
+            reply_to: Optional reply queue name.
+            deliver_at: Optional UTC datetime for delayed delivery.
+            correlation_id: Optional explicit correlation ID.
+
+        Returns:
+            Correlation ID used for the published packet.
+        """
         packet = DataPacket(
             sender=sender,
             content=content,
             reply_to=reply_to,
             deliver_at=deliver_at,
+            correlation_id=correlation_id or uuid.uuid4().hex,
         )
-        self.log.info("Sending packet", id=packet.id, correlation_id=packet.correlation_id)
-        # If a deliver_at timestamp is provided, schedule into a ZSET instead
-        if packet.deliver_at:
-            try:
-                # use UTC timestamp as score
-                # ensure we have a float timestamp
-                ts = float(packet.deliver_at.timestamp())
-            except Exception:
-                ts = time.time()
-            zset_key = f"{self.queue_name}_scheduled"
-            member = packet.model_dump_json()
-            # ZADD score member
-            await self._redis.zadd(zset_key, {member: ts})
-            self.log.info("Packet scheduled", correlation_id=packet.correlation_id, deliver_at=ts)
+
+        self.log.info(
+            "Sending packet",
+            id=packet.id,
+            correlation_id=packet.correlation_id,
+        )
+
+        message = Message(payload=packet.model_dump())
+        message.metadata.setdefault("submitted_at", time.time())
+
+        started = time.perf_counter()
+        if deliver_at:
+            ts = float(deliver_at.timestamp())
+            await self._publisher.publish(
+                self.queue_name,
+                message,
+                deliver_at=ts,
+            )
         else:
-            await self.broker.publish(packet, list=self.queue_name)
+            await self._publisher.publish(self.queue_name, message)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        await self._notify_publish(topic=self.queue_name, elapsed_ms=elapsed_ms, message=message)
+
         return packet.correlation_id
-
-    def on_message(
-        self,
-        handler: Callable[[DataPacket], MaybeAwaitable[Optional[Payload]]],
-    ) -> Callable[[DataPacket], Awaitable[None]]:
-        """Register request handler for `queue_name`.
-
-        The handler may be sync or async. If a request includes `reply_to`,
-        the handler result is returned as `ResponsePacket.content`.
-        """
-        @self.broker.subscriber(list=self.queue_name)
-        async def wrapper(data: DataPacket) -> None:
-            self.log.info("Message Received", packet_id=data.id, correlation_id=data.correlation_id)
-            try:
-                result = handler(data)
-                if asyncio.iscoroutine(result):
-                    result = await result
-                if data.reply_to:
-                    response = ResponsePacket(
-                        correlation_id=data.correlation_id,
-                        in_response_to=data.id,
-                        status="processed",
-                        content=result,
-                    )
-                    await self.broker.publish(response, list=data.reply_to)
-                    self.log.info("Response published", correlation_id=data.correlation_id, status="processed")
-            except Exception as exc:
-                self.log.exception("Message processing failed", packet_id=data.id, correlation_id=data.correlation_id)
-                if data.reply_to:
-                    failed_response = ResponsePacket(
-                        correlation_id=data.correlation_id,
-                        in_response_to=data.id,
-                        status="failed",
-                        content={"error": str(exc)},
-                    )
-                    await self.broker.publish(failed_response, list=data.reply_to)
-                    self.log.info("Response published", correlation_id=data.correlation_id, status="failed")
-        return wrapper
-
-    async def _run_scheduler_loop(self) -> None:
-        """Background loop that moves due messages from ZSET -> Redis List.
-
-        Uses a Lua script to atomically fetch and remove ready items (with score <= now).
-        The script returns an array of alternating member, score values.
-        """
-        zset_key = f"{self.queue_name}_scheduled"
-        # Lua script: ZRANGEBYSCORE WITHSCORES LIMIT 0 count; ZREM those members; return array
-        lua = r"""
-local res = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2], 'WITHSCORES')
-if #res == 0 then
-  return {}
-end
-local members = {}
-for i=1,#res,2 do
-  table.insert(members, res[i])
-end
-redis.call('ZREM', KEYS[1], unpack(members))
-return res
-"""
-
-        # how many items to pop per iteration
-        batch = 100
-        while True:
-            try:
-                now_ts = str(time.time())
-                raw = await self._redis.eval(lua, 1, zset_key, now_ts, str(batch))
-                if not raw:
-                    await asyncio.sleep(1)
-                    continue
-                # raw is [member1, score1, member2, score2, ...]
-                it = iter(raw)
-                for member, score in zip(it, it):
-                    try:
-                        # deserialize into DataPacket
-                        packet = DataPacket.model_validate_json(member)
-                        # publish to faststream list
-                        await self.broker.publish(packet, list=self.queue_name)
-                        self.log.info('Scheduled packet delivered', correlation_id=packet.correlation_id)
-                    except Exception:
-                        self.log.exception('Failed to deliver scheduled packet')
-                # small sleep to avoid hammering
-                await asyncio.sleep(0)
-            except Exception:
-                self.log.exception('Scheduler loop crashed; continuing')
-                await asyncio.sleep(1)
 
     def on_reply(
         self,
-        handler: Callable[[ResponsePacket], MaybeAwaitable[None]],
-    ) -> Callable[[ResponsePacket], Awaitable[None]]:
-        """Register reply handler for this broker instance's reply queue.
+        handler: OnReplyHandler | None = None,
+    ) -> OnReplyDecorator | Callable[[Message], Awaitable[None]]:
+        """Register a reply handler for inbound response packets.
 
-        The handler may be sync or async.
+        Purpose:
+            Attach a callback for responses published to this broker's reply queue.
+
+        Args:
+            handler: Optional handler function. If omitted, returns a decorator.
+
+        Returns:
+            Either a decorator or an adapter-facing async wrapper.
+
+        Example:
+            @broker.on_reply
+            async def handle_reply(reply: ResponsePacket) -> None:
+                print(reply.status)
         """
-        @self.broker.subscriber(list=self.reply_queue)
-        async def wrapper(data: ResponsePacket) -> None:
-            self.log.info("Reply received", correlation_id=data.correlation_id)
-            result = handler(data)
-            if asyncio.iscoroutine(result):
-                await result
-        return wrapper
+
+        if handler is None:
+            def decorator(fn: OnReplyHandler) -> Callable[[Message], Awaitable[None]]:
+                self._reply_handler = fn
+                self._reply_wrapper = self._make_reply_wrapper(fn)
+                return self._reply_wrapper
+
+            return cast(OnReplyDecorator, decorator)
+
+        self._reply_handler = handler
+        self._reply_wrapper = self._make_reply_wrapper(handler)
+        return self._reply_wrapper
 
     async def start(self) -> None:
-        """Start the FastStream application and block until shutdown."""
-        self.log.info("Starting Message Broker... Waiting for messages.")
-        # start scheduler background task
-        if self._scheduler_task is None:
-            self._scheduler_task = asyncio.create_task(self._run_scheduler_loop())
-        await self.app.run()
+        """Start consuming message and reply topics until cancellation."""
+
+        if self._subscriber is None:
+            raise RuntimeError("Call connect() before start().")
+
+        if self._message_wrapper is None:
+            async def _noop_message(_msg: DataPacket) -> None:
+                self.log.debug("No message handler registered; dropping message")
+
+            self._message_handler = _noop_message
+            self._message_wrapper = self._make_message_wrapper(_noop_message)
+
+        if self._reply_wrapper is None:
+            async def _noop_reply(_resp: ResponsePacket) -> None:
+                self.log.debug("No reply handler registered; ignoring reply")
+
+            self._reply_handler = _noop_reply
+            self._reply_wrapper = self._make_reply_wrapper(_noop_reply)
+
+        await self._subscriber.subscribe(self.queue_name, self._message_wrapper)
+        await self._subscriber.subscribe(self.reply_queue, self._reply_wrapper)
+
+        self.log.info("Broker started")
+
+        try:
+            self._run_task = asyncio.current_task()
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.log.info("Broker shutdown requested")
+            raise
+        finally:
+            await self.disconnect()
+
+    async def _resolve_result(self, maybe_result: MaybeAwaitable[Payload | None]) -> Payload | None:
+        if isawaitable(maybe_result):
+            task = asyncio.create_task(cast(Awaitable[Payload | None], maybe_result))
+            self._active_handler_tasks.add(task)
+            task.add_done_callback(self._active_handler_tasks.discard)
+            return await task
+        return cast(Payload | None, maybe_result)
+
+    def _resolve_handler_max_retries(self, message: Message) -> int:
+        configured = message.metadata.get("handler_max_retries")
+        if configured is None:
+            configured = self.context.options.get("handler_max_retries", 0)
+        if not isinstance(configured, int) or configured < 0:
+            return 0
+        return configured
+
+    def _resolve_processing_timeout_ms(self, message: Message) -> int | None:
+        configured = message.metadata.get("processing_timeout_ms")
+        if configured is None:
+            configured = self.context.options.get("processing_timeout_ms")
+        if configured is None:
+            return None
+        if not isinstance(configured, int) or configured <= 0:
+            return None
+        return configured
+
+    def _resolve_dlq_topic(self, source_topic: str) -> str | None:
+        dlq_topics = self.context.options.get("dlq_topics", {})
+        if isinstance(dlq_topics, dict):
+            topic = dlq_topics.get(source_topic)
+            if isinstance(topic, str) and topic.strip():
+                return topic
+        fallback = self.context.options.get("default_dlq_topic")
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback
+        return None
+
+    async def _publish_failure_response(self, packet: DataPacket | None, error: str) -> None:
+        if packet is None or not packet.reply_to:
+            return
+        failed = ResponsePacket(
+            correlation_id=packet.correlation_id,
+            in_response_to=packet.id,
+            status="failed",
+            content={"error": error},
+        )
+        await self._publisher.publish(
+            packet.reply_to,
+            Message(payload=failed.model_dump()),
+        )
+
+    async def _publish_to_dlq(
+        self,
+        *,
+        source_topic: str,
+        original_message: Message,
+        error: Exception,
+        retries: int,
+    ) -> None:
+        dlq_topic = self._resolve_dlq_topic(source_topic)
+        if dlq_topic is None or self._publisher is None:
+            return
+
+        failed_payload = {
+            "original_payload": original_message.payload,
+            "original_headers": dict(original_message.headers),
+            "original_metadata": dict(original_message.metadata),
+            "failure": {
+                "error": str(error),
+                "retries": retries,
+                "failed_at": time.time(),
+                "source_topic": source_topic,
+            },
+        }
+
+        dlq_message = Message(
+            payload=failed_payload,
+            headers={**original_message.headers, "x-dlq": "true"},
+            metadata={
+                **original_message.metadata,
+                "dlq": True,
+                "source_topic": source_topic,
+                "failed_at": time.time(),
+            },
+            correlation_id=original_message.correlation_id,
+        )
+        await self._publisher.publish(dlq_topic, dlq_message)
+
+    async def _notify_publish(self, *, topic: str, elapsed_ms: float, message: Message) -> None:
+        for observer in self._observers:
+            callback = getattr(observer, "on_publish", None)
+            if callback is None:
+                continue
+            result = callback(topic=topic, elapsed_ms=elapsed_ms, message=message)
+            if isawaitable(result):
+                await result
+
+    async def _notify_handler(
+        self,
+        *,
+        topic: str,
+        elapsed_ms: float,
+        message: Message,
+        status: str,
+    ) -> None:
+        for observer in self._observers:
+            callback = getattr(observer, "on_handler_execution", None)
+            if callback is None:
+                continue
+            result = callback(
+                topic=topic,
+                elapsed_ms=elapsed_ms,
+                message=message,
+                status=status,
+            )
+            if isawaitable(result):
+                await result
+
+    async def _notify_retry(
+        self,
+        *,
+        operation: str,
+        attempt: int,
+        max_retries: int,
+        error: Exception,
+    ) -> None:
+        for observer in self._observers:
+            callback = getattr(observer, "on_retry_attempt", None)
+            if callback is None:
+                continue
+            result = callback(
+                operation=operation,
+                attempt=attempt,
+                max_retries=max_retries,
+                error=error,
+            )
+            if isawaitable(result):
+                await result

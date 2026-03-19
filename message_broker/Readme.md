@@ -1,244 +1,353 @@
- message_broker — General-purpose async request/response queue
+# 🚀 message_broker — Enterprise Async Messaging Framework
 
-`message_broker` is a small, general-purpose Python package that provides a simple
-request/response messaging abstraction on top of `FastStream` + Redis. It's
-designed to be framework- and domain-agnostic: you can queue arbitrary JSON-like
-payloads, process them asynchronously, and optionally receive typed responses.
+> A transport-agnostic, asyncio-native messaging framework designed for **high-performance, scalable, and resilient distributed systems**.
 
-Key goals:
+---
 
-- Strong typing and runtime validation via Pydantic models.
-- Clear request/reply ergonomics for long-running or delayed tasks.
-- Minimal, easily-importable API for integration into web servers or background workers.
+## 📖 Overview
 
-## 📂 Project Layout
+`message_broker` is a **production-grade messaging abstraction layer** that lets you build asynchronous, event-driven systems **without coupling your application to a specific broker** like Redis or Kafka.
+
+Instead of writing broker-specific code, you write against a **unified interface**, and the framework handles:
+
+* connection management
+* serialization
+* retries & resilience
+* backpressure
+* observability
+* broker capability differences
+
+---
+
+## 🎯 What It Solves
+
+* Tight coupling to Redis/Kafka APIs
+* Inconsistent retry/error handling
+* Lack of backpressure → memory crashes
+* Hard-to-maintain messaging logic
+
+✔️ Provides:
+
+* clean abstraction layer
+* pluggable adapters
+* safe async processing
+* enterprise-level features out of the box
+
+---
+
+## ✨ Core Features
+
+* 🔌 **Pluggable Broker Adapters** (Redis, Kafka, extensible)
+* ⚡ **Async-first architecture** (`asyncio` native)
+* 🧠 **Backpressure-aware consumers**
+* 🔁 **Retry with exponential backoff**
+* 📡 **Observability hooks (OpenTelemetry ready)**
+* 🧩 **Middleware system**
+* 🧱 **Strict typing & schema validation**
+* 🧬 **Capability-based feature enforcement**
+* 🔄 **Built-in RPC (request-response pattern)**
+
+---
+
+## 📦 Installation
+
+```bash
+git clone https://github.com/SanjitKamath/Message_Broker.git
+cd message_broker
+
+python -m venv .venv
+source .venv/bin/activate   # Windows: .\.venv\Scripts\activate
+
+pip install -e .
+
+# Optional (OpenTelemetry)
+pip install -e .[otel]
+```
+
+---
+
+## ⚡ Quick Example
+
+```python
+import asyncio
+from message_broker import MessageBroker
+
+async def main():
+    broker = MessageBroker("redis://127.0.0.1:6379")
+
+    @broker.on_message
+    async def handle(data):
+        print(data.content)
+        return {"status": "ok"}
+
+    await broker.start()
+
+asyncio.run(main())
+```
+
+---
+
+# 🧩 Architecture Overview
+
+```
+Application Layer
+      ↓
+MessageBroker (High-Level API)
+      ↓
+Core Layer (Interfaces, Context, Registry)
+      ↓
+Adapters (Redis, Kafka, Custom)
+      ↓
+Actual Broker (Redis/Kafka/etc.)
+```
+
+---
+
+## 📂 Folder Structure
 
 ```text
-message_broker
-├── src/                  # package source root used for builds
-│   ├── __init__.py
-│   ├── app_logging.py
-│   ├── broker.py
-│   └── schema.py
+message_broker/
+├── src/
+│   ├── core/
+│   │   ├── context.py          # Connection parsing + config merging
+│   │   ├── interfaces.py       # Contracts (Publisher, Subscriber, Broker)
+│   │   ├── registry.py         # Adapter registration system
+│   │   ├── resilience.py       # Retry logic
+│   │   ├── serializers.py      # Serialization layer
+│   │   └── observability.py    # Middleware + tracing
+│   │
+│   └── adapters/
+│       ├── redis.py            # Redis implementation
+│       └── kafka.py            # Kafka implementation
+│
+├── broker.py                   # High-level API (MessageBroker)
+├── schema.py                   # DataPacket / ResponsePacket
+├── cli_messager.py             # Example sender
+├── cli_receiver.py             # Example receiver
 ├── pyproject.toml
-└── Readme.md             # This document
+└── README.md
 ```
 
 ---
 
-## 🚀 Setup Instructions
+# ⚙️ How It Works (Core Flow)
 
-### Prerequisites
+### 1. Context Creation
 
-* **Python 3.8+** installed.
-* **Redis Broker** running locally on port `6379`.
-
-### Windows Setup
-
-1. **Install Redis:** You can run Redis natively via [Memurai](https://www.memurai.com/get-memurai) or use the official Linux version via WSL2 (`sudo apt install redis-server`).
-2. **Open PowerShell** in your project directory.
-3. **Create and activate a virtual environment:**
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
+```python
+context = BrokerContext("redis://localhost:6379")
 ```
 
-4. **Install dependencies:**
-```powershell
-pip install -r requirements.txt
+* Parses URI
+* Merges config
+* Sets defaults
 
+---
+
+### 2. Broker Resolution
+
+```python
+broker = BrokerRegistry.create(context)
 ```
 
+* Finds correct adapter
+* Instantiates broker dynamically
 
+---
 
-### Mac Setup
+### 3. Publishing
 
-1. **Install Redis:** The easiest way is via Homebrew.
+```python
+await publisher.publish("topic", message)
+```
+
+Flow:
+
+```
+Message → Middleware → Serializer → Adapter → Broker
+```
+
+---
+
+### 4. Consuming
+
+```
+Broker → Adapter → Queue → Workers → Middleware → Handler
+```
+
+* Uses bounded queue → prevents overload
+* Workers process messages concurrently
+
+---
+
+### 5. RPC (Request-Response)
+
+```
+send_and_wait()
+   ↓
+Temporary reply queue
+   ↓
+Correlation ID tracking
+   ↓
+Response matched automatically
+```
+
+---
+
+# 📊 API Reference
+
+## 🔹 High-Level API (Recommended)
+
+| Function             | Description            | Example                           |
+| -------------------- | ---------------------- | --------------------------------- |
+| `MessageBroker(uri)` | Create broker instance | `MessageBroker("redis://...")`    |
+| `connect()`          | Connect to broker      | `await broker.connect()`          |
+| `start()`            | Start consuming        | `await broker.start()`            |
+| `send_message()`     | Send message           | `await broker.send_message(...)`  |
+| `send_and_wait()`    | RPC request-response   | `await broker.send_and_wait(...)` |
+| `on_message()`       | Register handler       | `@broker.on_message`              |
+| `on_reply()`         | Register reply handler | `@broker.on_reply`                |
+| `disconnect()`       | Graceful shutdown      | `await broker.disconnect()`       |
+
+---
+
+## 🔹 Core API (Advanced)
+
+| Component        | Purpose                         |
+| ---------------- | ------------------------------- |
+| `BrokerContext`  | Parses config + manages options |
+| `BrokerRegistry` | Resolves adapters dynamically   |
+| `Message`        | Transport-neutral message       |
+| `Publisher`      | Sends messages                  |
+| `Subscriber`     | Consumes messages               |
+| `Serializer`     | Handles encoding/decoding       |
+| `Middleware`     | Inject cross-cutting logic      |
+
+---
+
+# 🏗️ Advanced Usage
+
+## 🔁 Retry Configuration
+
+```python
+BrokerContext(
+    "redis://...",
+    max_retries=5
+)
+```
+
+---
+
+## ⚡ Backpressure Control
+
+```python
+BrokerContext(
+    "redis://...",
+    concurrency=20,
+    max_queue_size=500
+)
+```
+
+---
+
+## 🔍 Middleware Example
+
+```python
+from message_broker.src.core.observability import MetricsMiddleware
+
+BrokerContext(
+    "redis://...",
+    middlewares=[MetricsMiddleware()]
+)
+```
+
+---
+
+## 🧠 Capability Check
+
+```python
+if BrokerCapability.DELAYED_DELIVERY in broker.capabilities:
+    ...
+```
+
+---
+
+# 🔌 Extending the Framework
+
+## ➕ Add a New Broker
+
+### Step 1: Create adapter
+
+```text
+src/adapters/mybroker.py
+```
+
+---
+
+### Step 2: Implement interfaces
+
+* `Publisher`
+* `Subscriber`
+* `Broker`
+
+---
+
+### Step 3: Register adapter
+
+```python
+BrokerRegistry.register("mybroker", lambda ctx: MyBroker(ctx))
+```
+
+---
+
+### Step 4: Use it
+
+```python
+MessageBroker("mybroker://localhost")
+```
+
+---
+
+## ➖ Remove a Broker
+
+* Delete adapter file
+* Remove import
+* (Optional) unregister from registry
+
+---
+
+## 🔄 Replace a Broker
+
+No code changes needed:
+
+```python
+# Switch from Redis → Kafka
+MessageBroker("kafka://localhost:9092")
+```
+
+---
+
+# 🧪 CLI Examples
+
 ```bash
-brew install redis
-brew services start redis
-
-```
-
-
-2. **Open your Terminal** in your project directory.
-3. **Create and activate a virtual environment:**
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-```
-
-
-4. **Install dependencies:**
-```bash
-pip install -r requirements.txt
-
-```
-
-
-
----
-
-## ⚙️ How It Works
-
-At a high level, the package provides:
-
-- `MessageBroker` — a wrapper class that manages a FastStream app and Redis broker.
-- `DataPacket` / `ResponsePacket` — Pydantic models that define the request/response envelopes.
-
-The system uses a **Redis List** as a durable queue. Producers push `DataPacket`s
-to the configured list; consumers subscribe and process messages one-by-one. If
-a `reply_to` queue is provided in the `DataPacket`, the consumer publishes a
-`ResponsePacket` back to that queue when processing completes.
-
-This package also supports scheduled (delayed) delivery: when a `DataPacket`
-includes a `deliver_at` UTC timestamp the producer will store the serialized
-packet in a Redis Sorted Set named `{queue_name}_scheduled`. A background
-scheduler (running in the broker process) atomically moves due messages from
-the ZSET onto the primary Redis List so existing consumers process them
-normally. This ensures reliable delayed delivery without blocking producers.
-
----
-
-**Architecture diagram (sequence & components)**
-
-```mermaid
-flowchart LR
-    Producer[Producer (web server / job dispatcher)] -->|push DataPacket| Redis[Redis List Queue]
-    Redis -->|pop| Consumer[Consumer / Worker (FastStream)]
-    Consumer -->|publish ResponsePacket| ReplyQueue[Reply Queue]
-    ReplyQueue -->|deliver response| Producer
-```
-
-The producer may optionally attach a `reply_to` value. When set, the consumer
-publishes a `ResponsePacket` to that queue containing `correlation_id` and the
-`content` produced by the handler.
-
----
-
-## Installation
-
-Create a virtual environment and install dependencies:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate   # or .\\.venv\\Scripts\\Activate.ps1 on Windows
-pip install -r requirements.txt
-```
-
-Make sure a Redis server is reachable at the `redis://` URL you pass to
-`MessageBroker` (defaults in examples use `redis://127.0.0.1:6379`).
-
----
-
-### Install as a package (optional)
-
-You can install the project locally so other scripts/processes can `import message_broker`:
-
-```bash
-python -m pip install -e .
-# or for a normal install
-python -m pip install .
-```
-
-When installed, the project exposes console scripts (see `pyproject.toml`) so you can run the examples as commands: `mb-receiver` and `mb-messager`.
-
-
-## Quick Start (examples)
-
-Start a worker that consumes requests and replies:
-
-```bash
-python receiver.py
-```
-
-In another shell send a request and wait for reply:
-
-```bash
-python messager.py
-```
-
-Both example scripts import and use the package-level API:
-
-- `from message_broker import MessageBroker, DataPacket, ResponsePacket`
-
-If you installed the package you can also run the provided console scripts:
-
-```bash
-mb-receiver    # start worker (when installed)
-mb-messager    # send request (when installed)
+python -m message_broker.cli_receiver
+python -m message_broker.cli_messager
 ```
 
 ---
 
-## API Reference — Parameters & Features
+# ⚙️ Configuration System
 
-The following table summarizes the public API, accepted parameters, and behavior.
+Supports:
 
-| Symbol | Type / Args | Description |
-|---|---:|---|
-| `MessageBroker(redis_url, queue_name='default_queue')` | constructor | Creates a broker instance bound to a Redis URL and queue name. Also creates a unique `reply_queue` for replies when requested. |
-| `send_message(content, sender, reply=False, deliver_at=None)` | `content`: JSON-like; `sender`: str; `reply`: bool; `deliver_at`: Optional[datetime] | Publish a `DataPacket` to the broker queue. If `deliver_at` is provided the packet is scheduled into `{queue_name}_scheduled` and delivered when the timestamp is reached. Returns the `correlation_id` string. If `reply=True`, the instance reply queue is attached to the packet. |
-| `on_message(handler)` | `handler`: callable `DataPacket -> Optional[Payload]` (sync or async) | Decorator to register a request handler. If the incoming packet has `reply_to`, the handler return value is sent back as `ResponsePacket.content`. |
-| `on_reply(handler)` | `handler`: callable `ResponsePacket -> None` (sync or async) | Register a callback for replies on the instance reply queue. Useful for waiting for responses in requesters. |
-| `DataPacket` model | fields: `id: str`, `sender: str`, `content: Payload`, `correlation_id: str`, `reply_to: Optional[str]`, `deliver_at: Optional[datetime]` | Request envelope. `content` is a JSON-like alias (`Payload`) for rich structured data. `id` and `correlation_id` default to UUID strings. `deliver_at` can be set to schedule delayed delivery. |
-| `ResponsePacket` model | fields: `correlation_id: str`, `in_response_to: str`, `status: str`, `content: Optional[Payload]`, `processed_at: datetime` | Response envelope published back to the `reply_to` queue. `processed_at` is timezone-aware UTC.
+* URI query params
+* kwargs
+* environment overrides
 
-Notes:
-
-- Handlers may be synchronous or async — the package will `await` coroutine results when necessary.
-- Consumers now always send an explicit failed response when a handler raises and the incoming packet included `reply_to`.
- - Consumers now always send an explicit failed response when a handler raises and the incoming packet included `reply_to`.
- - Scheduled delivery: packets with `deliver_at` are stored in a Redis Sorted Set named `{queue_name}_scheduled`. The broker runs a background scheduler that atomically pops due items and republishes them to the main list for processing.
-
-Requirements note: this implementation uses the `redis` async client (`redis.asyncio`). Ensure `redis` is installed in your environment (added to `requirements.txt`).
-
----
-
-## Real-world Example: Government Account Opening (BSE)
-
-Scenario: A web API accepts account opening requests which the external regulator (BSE) processes asynchronously and can take from 30 minutes to multiple days to respond. You don't want your API threads to block while waiting.
-
-Sequence:
-
-```mermaid
-flowchart LR
-	ClientAPI[Client HTTP API] -->|enqueue request| Producer(Producer: MessageBroker.send_message)
-	Producer --> Redis[Redis Queue]
-	Worker[Verification Worker] -->|consume| Redis
-	Worker -->|call external BSE API| External[BSE API]
-	External -->|async callback or poll| Worker
-	Worker -->|publish response| ReplyQueue
-	ClientAPI -->|listen/notify| ReplyQueue
+```python
+BrokerContext(
+    "redis://localhost:6379?timeout=3000",
+    concurrency=10,
+    max_retries=3
+)
 ```
-
-Implementation notes:
-
-- The API handler constructs a `DataPacket` with `content` containing applicant data and a `reply=True` so the originating API server can listen for the result.
-- The worker may call the BSE API and either poll or receive a webhook/callback. When BSE responds (hours/days later), the worker publishes a `ResponsePacket` with the verification result.
-- The API server can then notify the original user via websocket, email, or by letting the client poll a status endpoint which reads latest responses from a persistence store indexed by `correlation_id`.
-
-This pattern keeps web requests non-blocking and provides strong typing for the payload exchanged between services.
-
----
-
-## Contributing & Notes
-
-- The package is intentionally small and framework-agnostic. If you need guaranteed-delivery semantics across restarts, consider combining Redis Lists with an external persistence store and deduplication by `id`/`correlation_id`.
-- For production, pin dependency versions in `requirements.txt` or use a lockfile.
-
----
-
-If you'd like, I can also:
-
-1. Add a small `examples/` folder with a ready-to-run web API that enqueues requests.
-2. Produce unit tests for the `MessageBroker` behaviour (handlers, reply routing, failure responses).
-
----
-
-Read the code in `message_broker/` for full type definitions and docstrings.
-
-
-
