@@ -20,10 +20,6 @@ otel = [
     "opentelemetry-api>=1.20.0"
 ]
 
-[project.scripts]
-mb-messager = "message_broker.cli_messager:run"
-mb-receiver = "message_broker.cli_receiver:run"
-
 [project.entry-points."message_broker.adapters"]
 redis = "message_broker.adapters.redis:redis_factory"
 kafka = "message_broker.adapters.kafka:kafka_factory"

@@ -108,24 +108,31 @@ Actual Broker (Redis/Kafka/etc.)
 ```text
 message_broker/
 ├── src/
+│   ├── adapters/
+│   │   ├── __init__.py
+│   │   ├── kafka.py            # Kafka implementation
+│   │   └── redis.py            # Redis implementation
+│   │
 │   ├── core/
+│   │   ├── __init__.py
 │   │   ├── context.py          # Connection parsing + config merging
+│   │   ├── exceptions.py       # Custom exceptions
 │   │   ├── interfaces.py       # Contracts (Publisher, Subscriber, Broker)
+│   │   ├── observability.py    # Middleware + tracing
 │   │   ├── registry.py         # Adapter registration system
 │   │   ├── resilience.py       # Retry logic
-│   │   ├── serializers.py      # Serialization layer
-│   │   └── observability.py    # Middleware + tracing
+│   │   └── serializers.py      # Serialization layer
 │   │
-│   └── adapters/
-│       ├── redis.py            # Redis implementation
-│       └── kafka.py            # Kafka implementation
+│   ├── __init__.py
+│   ├── app_logging.py          # Logging setup
+│   ├── broker.py               # High-level API (MessageBroker)
+│   ├── cli_messager.py         # Example sender
+│   ├── cli_receiver.py         # Example receiver
+│   └── schema.py               # DataPacket / ResponsePacket
 │
-├── broker.py                   # High-level API (MessageBroker)
-├── schema.py                   # DataPacket / ResponsePacket
-├── cli_messager.py             # Example sender
-├── cli_receiver.py             # Example receiver
 ├── pyproject.toml
-└── README.md
+├── README.md
+└── .gitignore
 ```
 
 ---
