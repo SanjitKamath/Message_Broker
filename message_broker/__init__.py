@@ -12,8 +12,26 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
 	from .src.broker import MessageBroker
 	from .src.schema import DataPacket, Payload, ResponsePacket
+	from .src.core.interfaces import Message, Middleware, BrokerCapability, Broker
 
-__all__ = ["MessageBroker", "DataPacket", "ResponsePacket", "Payload"]
+__all__ = [
+	"MessageBroker",
+	"DataPacket",
+	"ResponsePacket",
+	"Payload",
+	"Message",
+	"Middleware",
+	"BrokerCapability",
+	"connect",
+]
+
+
+async def connect(connection_uri: str, **kwargs: Any) -> "Broker":
+	"""Initialize a broker from a URI with automatic adapter selection."""
+
+	from .src import connect as _connect
+
+	return await _connect(connection_uri, **kwargs)
 
 
 def __getattr__(name: str) -> Any:
@@ -30,6 +48,15 @@ def __getattr__(name: str) -> Any:
 			"DataPacket": DataPacket,
 			"Payload": Payload,
 			"ResponsePacket": ResponsePacket,
+		}
+		return mapping[name]
+	if name in {"Message", "Middleware", "BrokerCapability"}:
+		from .src.core.interfaces import Message, Middleware, BrokerCapability
+
+		mapping = {
+			"Message": Message,
+			"Middleware": Middleware,
+			"BrokerCapability": BrokerCapability,
 		}
 		return mapping[name]
 
