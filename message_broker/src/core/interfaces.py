@@ -10,7 +10,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Flag, auto
 from types import TracebackType
 from typing import Any, TypeAlias
 from uuid import uuid4
@@ -18,28 +17,6 @@ from uuid import uuid4
 JsonValue: TypeAlias = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 MessageHandler = Callable[["Message"], Awaitable[None]]
-
-
-class BrokerCapability(Flag):
-    """Enum of features that a broker adapter may or may not support.
-
-    Use the capabilities property on a Broker instance to check if a feature
-    is available before attempting to use it. This prevents silent failures and
-    enables graceful degradation when advanced features are not supported.
-
-    Examples:
-        if BrokerCapability.DELAYED_DELIVERY in broker.capabilities:
-            await publisher.publish(topic, msg, deliver_at=time.time() + 3600)
-    """
-
-    DELAYED_DELIVERY = auto()
-    """Broker supports scheduled message delivery via deliver_at parameter."""
-
-    BATCH_PUBLISH = auto()
-    """Broker supports publishing multiple messages in a single atomic operation."""
-
-    RPC_REPLIES = auto()
-    """Broker supports request-reply pattern with correlation-based matching."""
 
 
 @dataclass(slots=True)
@@ -187,14 +164,11 @@ class Publisher(ABC):
             timeout_ms: Optional request timeout in milliseconds.
             deliver_at: Optional POSIX timestamp (seconds since epoch) for scheduled delivery.
                          If provided, the message will be delivered at or after that time.
-                         Not all adapters support this (e.g., Kafka raises FeatureNotSupportedError).
 
         Raises:
             message_broker.core.exceptions.PublishFailedError: If send fails.
             message_broker.core.exceptions.ConnectionLostError: If transport is
                 unavailable during publish.
-            message_broker.core.exceptions.FeatureNotSupportedError: If the adapter
-                does not support scheduled delivery.
 
         Example:
             await publisher.publish("jobs", Message(payload={"id": 1}))
@@ -216,16 +190,14 @@ class ScheduledEnvelope:
 
 
 class EnforcingPublisher(Publisher):
-    """Publisher wrapper that enforces broker capabilities centrally.
+    """Publisher wrapper that applies middleware and handles scheduling envelopes.
 
-    This wrapper checks requested features (e.g., `deliver_at`) against the
-    owning broker's `capabilities` before delegating to the adapter-specific
-    publisher implementation. It preserves the existing `publish` API so
-    client code need not change.
+    Delayed delivery is part of the core publish contract. This wrapper only
+    normalizes call styles, applies `before_publish` middleware, and wraps
+    delayed messages into ScheduledEnvelope for adapter consumption.
     """
 
-    def __init__(self, broker: "Broker", delegate: Publisher) -> None:
-        self._broker = broker
+    def __init__(self, delegate: Publisher) -> None:
         self._delegate = delegate
 
     async def publish(self, *args, **kwargs) -> None:
@@ -236,8 +208,6 @@ class EnforcingPublisher(Publisher):
         (some examples pass keywords), this wrapper extracts the values from
         either `args` or `kwargs` and delegates to the underlying publisher.
         """
-        from .exceptions import FeatureNotSupportedError  # local import to avoid cycles
-
         # Extract topic and message from positional or keyword args
         if len(args) >= 2:
             topic = args[0]
@@ -253,17 +223,8 @@ class EnforcingPublisher(Publisher):
         if topic is None or message is None:
             raise TypeError("publish() missing required 'topic' and/or 'message' arguments")
 
-        # Enforce delayed delivery support centrally
+        # Wrap delayed messages into a transport-neutral scheduling envelope
         if deliver_at is not None:
-            if BrokerCapability.DELAYED_DELIVERY not in self._broker.capabilities:
-                raise FeatureNotSupportedError(
-                    "Requested scheduled delivery (deliver_at) is not supported by this broker.",
-                    broker=getattr(self._broker, "__name__", None) or None,
-                    operation="publish",
-                )
-
-            # Wrap into ScheduledEnvelope and delegate (deliver_at captured in envelope)
-            # Apply before_publish middleware from delegate's context if available
             ctx = getattr(self._delegate, "_context", None)
             if ctx is not None and getattr(ctx, "middlewares", None):
                 for middleware in ctx.middlewares:
@@ -320,21 +281,6 @@ class Subscriber(ABC):
 
 class Broker(ABC):
     """Coordinates connection lifecycle and access to pub/sub primitives."""
-
-    @property
-    @abstractmethod
-    def capabilities(self) -> frozenset[BrokerCapability]:
-        """Return the set of features supported by this broker.
-
-        Returns:
-            Immutable set of BrokerCapability flags that this adapter supports.
-            Empty set if no advanced features are available.
-
-        Examples:
-            broker = await connect("redis://localhost")
-            if BrokerCapability.DELAYED_DELIVERY in broker.capabilities:
-                print("Scheduled delivery is available")
-        """
 
     @abstractmethod
     async def connect(self) -> None:

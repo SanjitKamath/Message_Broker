@@ -6,7 +6,7 @@
 
 ## 📖 Overview
 
-`message_broker` is a **production-grade messaging abstraction layer** that lets you build asynchronous, event-driven systems **without coupling your application to a specific broker** like Redis or Kafka.
+`message_broker` is a **production-grade messaging abstraction layer** that lets you build asynchronous, event-driven systems **without coupling your application to a specific broker**.
 
 Instead of writing broker-specific code, you write against a **unified interface**, and the framework handles:
 
@@ -21,7 +21,7 @@ Instead of writing broker-specific code, you write against a **unified interface
 
 ## 🎯 What It Solves
 
-* Tight coupling to Redis/Kafka APIs
+* Tight coupling to broker-specific APIs
 * Inconsistent retry/error handling
 * Lack of backpressure → memory crashes
 * Hard-to-maintain messaging logic
@@ -37,14 +37,14 @@ Instead of writing broker-specific code, you write against a **unified interface
 
 ## ✨ Core Features
 
-* 🔌 **Pluggable Broker Adapters** (Redis, Kafka, extensible)
+* 🔌 **Pluggable Broker Adapters** (Redis, extensible)
 * ⚡ **Async-first architecture** (`asyncio` native)
 * 🧠 **Backpressure-aware consumers**
 * 🔁 **Retry with exponential backoff**
 * 📡 **Observability hooks (OpenTelemetry ready)**
 * 🧩 **Middleware system**
 * 🧱 **Strict typing & schema validation**
-* 🧬 **Capability-based feature enforcement**
+* ⏰ **Built-in delayed delivery support**
 * 🔄 **Built-in RPC (request-response pattern)**
 
 ---
@@ -96,9 +96,9 @@ MessageBroker (High-Level API)
       ↓
 Core Layer (Interfaces, Context, Registry)
       ↓
-Adapters (Redis, Kafka, Custom)
+Adapters (Redis, Custom)
       ↓
-Actual Broker (Redis/Kafka/etc.)
+Actual Broker (Redis/etc.)
 ```
 
 ---
@@ -110,7 +110,6 @@ message_broker/
 ├── src/
 │   ├── adapters/
 │   │   ├── __init__.py
-│   │   ├── kafka.py            # Kafka implementation
 │   │   └── redis.py            # Redis implementation
 │   │
 │   ├── core/
@@ -270,11 +269,16 @@ BrokerContext(
 
 ---
 
-## 🧠 Capability Check
+## 🧠 Delayed Delivery
 
 ```python
-if BrokerCapability.DELAYED_DELIVERY in broker.capabilities:
-    ...
+from datetime import datetime, timedelta
+
+await broker.send_message(
+    content={"task": "sync"},
+    sender="scheduler",
+    deliver_at=datetime.utcnow() + timedelta(seconds=30),
+)
 ```
 
 ---
@@ -328,8 +332,8 @@ MessageBroker("mybroker://localhost")
 No code changes needed:
 
 ```python
-# Switch from Redis → Kafka
-MessageBroker("kafka://localhost:9092")
+# Switch from Redis → Another adapter
+MessageBroker("mybroker://localhost")
 ```
 
 ---

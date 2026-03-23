@@ -2,7 +2,7 @@
 message_broker
 
 A lightweight, async-friendly message broker abstraction supporting
-multiple backends (e.g., Redis, Kafka).
+pluggable backends with delayed-delivery support.
 
 This package provides:
 
@@ -12,7 +12,6 @@ This package provides:
 - `Payload` → Message payload type
 - `DataPacket` / `ResponsePacket` → Transport-level structures
 - `Middleware` → Interception hooks for message processing
-- `BrokerCapability` → Feature flags supported by a broker
 
 Example:
     from message_broker import connect, Message
@@ -26,7 +25,6 @@ from __future__ import annotations
 from typing import Final
 
 from .message_broker import (
-    BrokerCapability,
     DataPacket,
     Message,
     MessageBroker,
@@ -44,6 +42,5 @@ __all__: Final[list[str]] = [
     "Payload",
     "Message",
     "Middleware",
-    "BrokerCapability",
     "connect",
 ]

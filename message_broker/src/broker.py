@@ -1,6 +1,6 @@
 """
 This code is the entry point for the MessageBroker class, which provides a high-level abstraction for building message-driven applications on top of various broker 
-adapters (like Redis or Kafka). The MessageBroker class manages the connection to the broker, allows users to register message handlers and reply handlers, and handles 
+adapters. The MessageBroker class manages the connection to the broker, allows users to register message handlers and reply handlers, and handles 
 the publishing and consuming of messages in a transport-agnostic way. It also includes features like retry logic, processing timeouts, and dead-letter queue handling to 
 make it robust for real-world applications. The code is designed to be flexible and extensible, allowing users to focus on their business logic while the MessageBroker 
 takes care of the underlying mechanics of message handling.
@@ -53,7 +53,7 @@ class MessageBroker:
     ) -> None:
         self.log = get_logger(self.__class__.__name__) # Initializes a structured logger specifically named "MessageBroker"
         self.context = BrokerContext(connection_uri, **context_options) # Takes the raw URI and extra options and feeds them into
-        self.broker = BrokerRegistry.create(self.context) # Uses the context to figure out which adapter to instantiate (like RedisBroker or KafkaBroker) based on the URI scheme and options
+        self.broker = BrokerRegistry.create(self.context) # Uses the context to figure out which adapter to instantiate based on the URI scheme and options
 
         self.queue_name = queue_name # Saves the target queue name
         self.reply_queue = f"reply_queue_{uuid.uuid4().hex}"
@@ -75,7 +75,7 @@ class MessageBroker:
     async def connect(self) -> None:
         """Connect the underlying adapter and prepare pub/sub primitives."""
 
-        await self.broker.connect() # Establishes a TCP connection with the underlying adapter's server (like Redis or Kafka)
+        await self.broker.connect() # Establishes a TCP connection with the underlying adapter's server
         self._publisher = self.broker.get_publisher()
         self._subscriber = self.broker.get_subscriber()
 
@@ -186,7 +186,7 @@ class MessageBroker:
         self._pending_replies[correlation_id] = waiter
 
         try:
-            # Sends the message out to Redis/Kafka.
+            # Sends the message out through the configured broker adapter.
             await self._build_and_publish_packet(
                 content=content,
                 sender=sender,
@@ -209,7 +209,7 @@ class MessageBroker:
     ) -> Callable[[Message], Awaitable[None]]:
         """Build and cache adapter-facing message wrapper once per registration."""
 
-        async def wrapper(msg: Message) -> None: # This is the actual function that Redis/Kafka will call when a message arrives.
+        async def wrapper(msg: Message) -> None: # This is the actual function the adapter calls when a message arrives.
             data: DataPacket | None = None
             try:
                 data = DataPacket(**msg.payload)
@@ -219,113 +219,130 @@ class MessageBroker:
                     correlation_id=data.correlation_id,
                 )
 
+                idempotency_reserved = await self._begin_idempotent_processing(
+                    message_id=data.id,
+                    topic=str(msg.metadata.get("source_topic", self.queue_name)),
+                    message=msg,
+                )
+                if not idempotency_reserved:
+                    return
+
+                processing_succeeded = False
+
                 max_retries = self._resolve_handler_max_retries(msg)
                 timeout_ms = self._resolve_processing_timeout_ms(msg)
                 source_topic = str(msg.metadata.get("source_topic", self.queue_name))
 
-                attempt = 0
-                while True:
-                    started = time.perf_counter()
-                    status = "processed"
-                    """
-                    Try block for handler execution: We attempt to execute the user's handler function with the parsed DataPacket. 
-                    If the handler executes successfully within the allowed processing time, we proceed to notify observers and publish 
-                    a response if needed. However, if the handler raises an exception or exceeds the processing timeout, we catch that 
-                    and enter the retry logic. This structure allows us to handle both expected and unexpected errors gracefully while 
-                    providing hooks for observability and response handling.
-                    """
-                    try:
-                        handler_result = user_handler(data)
-                        if timeout_ms is not None:
-                            handler_result = await asyncio.wait_for(
-                                self._resolve_result(handler_result),
-                                timeout=timeout_ms / 1000.0,
-                            )
-                        else:
-                            handler_result = await self._resolve_result(handler_result) # Checks if the user wrote def or async def and safely awaits it either way
+                try:
+                    attempt = 0
+                    while True:
+                        started = time.perf_counter()
+                        status = "processed"
+                        """
+                        Try block for handler execution: We attempt to execute the user's handler function with the parsed DataPacket. 
+                        If the handler executes successfully within the allowed processing time, we proceed to notify observers and publish 
+                        a response if needed. However, if the handler raises an exception or exceeds the processing timeout, we catch that 
+                        and enter the retry logic. This structure allows us to handle both expected and unexpected errors gracefully while 
+                        providing hooks for observability and response handling.
+                        """
+                        try:
+                            handler_result = user_handler(data)
+                            if timeout_ms is not None:
+                                handler_result = await asyncio.wait_for(
+                                    self._resolve_result(handler_result),
+                                    timeout=timeout_ms / 1000.0,
+                                )
+                            else:
+                                handler_result = await self._resolve_result(handler_result) # Checks if the user wrote def or async def and safely awaits it either way
 
-                        elapsed_ms = (time.perf_counter() - started) * 1000.0
-                        await self._notify_handler(
-                            topic=source_topic,
-                            elapsed_ms=elapsed_ms,
-                            message=msg,
-                            status=status,
-                        )
+                            elapsed_ms = (time.perf_counter() - started) * 1000.0
+                            await self._notify_handler(
+                                topic=source_topic,
+                                elapsed_ms=elapsed_ms,
+                                message=msg,
+                                status=status,
+                            )
 
-                        if data.reply_to:
-                            response = ResponsePacket(
-                                correlation_id=data.correlation_id,
-                                in_response_to=data.id,
-                                status="processed",
-                                content=handler_result,
+                            if data.reply_to:
+                                response = ResponsePacket(
+                                    correlation_id=data.correlation_id,
+                                    in_response_to=data.id,
+                                    status="processed",
+                                    content=handler_result,
+                                )
+                                await self._publisher.publish(
+                                    data.reply_to,
+                                    Message(payload=response.model_dump()),
+                                )
+                                self.log.info(
+                                    "Response published",
+                                    correlation_id=data.correlation_id,
+                                )
+                            processing_succeeded = True
+                            return
+                        
+                        # Error handling and retry logic: If the handler raises an exception or if it exceeds the specified processing timeout, we catch that 
+                        # and decide whether to retry based on the max_retries configuration. If we exhaust all retries, we publish a failure response (if reply_to is set) 
+                        # and/or send the original message to a dead-letter queue for later inspection.
+                        except asyncio.TimeoutError as exc:
+                            status = "timeout"
+                            elapsed_ms = (time.perf_counter() - started) * 1000.0
+                            await self._notify_handler(
+                                topic=source_topic,
+                                elapsed_ms=elapsed_ms,
+                                message=msg,
+                                status=status,
                             )
-                            await self._publisher.publish(
-                                data.reply_to,
-                                Message(payload=response.model_dump()),
-                            )
-                            self.log.info(
-                                "Response published",
-                                correlation_id=data.correlation_id,
-                            )
-                        return
-                    
-                    # Error handling and retry logic: If the handler raises an exception or if it exceeds the specified processing timeout, we catch that 
-                    # and decide whether to retry based on the max_retries configuration. If we exhaust all retries, we publish a failure response (if reply_to is set) 
-                    # and/or send the original message to a dead-letter queue for later inspection.
-                    except asyncio.TimeoutError as exc:
-                        status = "timeout"
-                        elapsed_ms = (time.perf_counter() - started) * 1000.0
-                        await self._notify_handler(
-                            topic=source_topic,
-                            elapsed_ms=elapsed_ms,
-                            message=msg,
-                            status=status,
-                        )
-                        if attempt < max_retries:
-                            attempt += 1
-                            await self._notify_retry(
-                                operation="handler",
-                                attempt=attempt,
-                                max_retries=max_retries,
+                            if attempt < max_retries:
+                                attempt += 1
+                                await self._notify_retry(
+                                    operation="handler",
+                                    attempt=attempt,
+                                    max_retries=max_retries,
+                                    error=exc,
+                                )
+                                continue
+                            await self._publish_failure_response(data, str(exc))
+                            await self._publish_to_dlq(
+                                source_topic=source_topic,
+                                original_message=msg,
                                 error=exc,
+                                retries=attempt,
                             )
-                            continue
-                        await self._publish_failure_response(data, str(exc))
-                        await self._publish_to_dlq(
-                            source_topic=source_topic,
-                            original_message=msg,
-                            error=exc,
-                            retries=attempt,
-                        )
-                        return
-                    
-                    # Error handling for exceptions raised by the handler itself (not just timeouts)
-                    except Exception as exc:
-                        status = "failed"
-                        elapsed_ms = (time.perf_counter() - started) * 1000.0
-                        await self._notify_handler(
-                            topic=source_topic,
-                            elapsed_ms=elapsed_ms,
-                            message=msg,
-                            status=status,
-                        )
-                        if attempt < max_retries:
-                            attempt += 1
-                            await self._notify_retry(
-                                operation="handler",
-                                attempt=attempt,
-                                max_retries=max_retries,
+                            return
+                        
+                        # Error handling for exceptions raised by the handler itself (not just timeouts)
+                        except Exception as exc:
+                            status = "failed"
+                            elapsed_ms = (time.perf_counter() - started) * 1000.0
+                            await self._notify_handler(
+                                topic=source_topic,
+                                elapsed_ms=elapsed_ms,
+                                message=msg,
+                                status=status,
+                            )
+                            if attempt < max_retries:
+                                attempt += 1
+                                await self._notify_retry(
+                                    operation="handler",
+                                    attempt=attempt,
+                                    max_retries=max_retries,
+                                    error=exc,
+                                )
+                                continue
+                            await self._publish_failure_response(data, str(exc))
+                            await self._publish_to_dlq(
+                                source_topic=source_topic,
+                                original_message=msg,
                                 error=exc,
+                                retries=attempt,
                             )
-                            continue
-                        await self._publish_failure_response(data, str(exc))
-                        await self._publish_to_dlq(
-                            source_topic=source_topic,
-                            original_message=msg,
-                            error=exc,
-                            retries=attempt,
-                        )
-                        return
+                            return
+                finally:
+                    if processing_succeeded:
+                        await self._complete_idempotent_processing(data.id)
+                    else:
+                        await self._abort_idempotent_processing(data.id)
             
             # Error handling for issues that occur during message parsing or before the handler is even called. Since we might not have a valid DataPacket 
             # (if parsing fails), we can't rely on correlation_id or reply_to, so we just log the error and attempt to publish to the DLQ if possible.
@@ -652,6 +669,78 @@ class MessageBroker:
             correlation_id=original_message.correlation_id,
         )
         await self._publisher.publish(dlq_topic, dlq_message)
+
+    async def _begin_idempotent_processing(
+        self,
+        *,
+        message_id: str,
+        topic: str,
+        message: Message,
+    ) -> bool:
+        """Reserve a message ID before executing a handler to avoid duplicates."""
+
+        reserve = getattr(self.broker, "try_acquire_idempotency", None)
+        if reserve is None:
+            return True
+
+        try:
+            acquired = await reserve(message_id)
+        except Exception as exc:
+            self.log.warning(
+                "Idempotency reservation failed; processing message",
+                packet_id=message_id,
+                error=str(exc),
+            )
+            return True
+
+        if acquired:
+            return True
+
+        self.log.info("Duplicate message skipped", packet_id=message_id, topic=topic)
+        await self._notify_handler(
+            topic=topic,
+            elapsed_ms=0.0,
+            message=message,
+            status="idempotency_skipped",
+        )
+        await self._notify_runtime_event(
+            event="idempotency_skip",
+            details={"message_id": message_id, "topic": topic},
+        )
+        return False
+
+    async def _complete_idempotent_processing(self, message_id: str) -> None:
+        """Mark a message ID as completed once handler processing succeeds."""
+
+        complete = getattr(self.broker, "mark_idempotency_completed", None)
+        if complete is None:
+            return
+        try:
+            await complete(message_id)
+        except Exception:
+            self.log.exception("Failed to mark idempotency as completed", packet_id=message_id)
+
+    async def _abort_idempotent_processing(self, message_id: str) -> None:
+        """Clear processing marker when execution fails and should remain retriable."""
+
+        abort = getattr(self.broker, "clear_idempotency_processing", None)
+        if abort is None:
+            return
+        try:
+            await abort(message_id)
+        except Exception:
+            self.log.exception("Failed to clear idempotency marker", packet_id=message_id)
+
+    async def _notify_runtime_event(self, *, event: str, details: dict[str, object]) -> None:
+        """Emit optional runtime events for observers that support custom hooks."""
+
+        for observer in self._observers:
+            callback = getattr(observer, "on_runtime_event", None)
+            if callback is None:
+                continue
+            result = callback(event=event, details=details)
+            if isawaitable(result):
+                await result
 
     """
     This method is called after a message is published to notify any observers about the publish event, including the topic, 

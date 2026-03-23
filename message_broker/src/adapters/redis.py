@@ -12,17 +12,19 @@ import json
 import logging
 import time
 from dataclasses import asdict
+from inspect import isawaitable
 from typing import Any
+from uuid import uuid4
 
 from redis import asyncio as redis
 from redis.exceptions import RedisError
 
+from ..app_logging import get_logger
 from ..core.context import BrokerContext
 from ..core.exceptions import ConfigurationError
 from ..core.exceptions import ConnectionLostError, PublishFailedError
 from ..core.interfaces import (
     Broker,
-    BrokerCapability,
     Message,
     MessageHandler,
     Publisher,
@@ -83,41 +85,32 @@ class RedisPublisher(Publisher):
         resolved_topic = topic
         effective_deliver_at = deliver_at
         
-        # Prepare payloads. For scheduled messages we create a transport-neutral
-        # envelope and let the scheduler route it. For immediate messages we
-        # serialize the original message object.
+        # Prepare payloads. For scheduled messages we persist routing and payload
+        # in dedicated Redis structures and place only a token in the ZSET.
         if isinstance(message, ScheduledEnvelope):
-            # Adapter may receive ScheduledEnvelope directly (if caller passed it),
-            # but the public API wraps scheduled messages via EnforcingPublisher.
             scheduled = message
             resolved_topic = scheduled.target
             effective_deliver_at = float(scheduled.deliver_at)
-            envelope_dict = {
-                "__scheduled__": True,
-                "target": scheduled.target,
-                "deliver_at": float(scheduled.deliver_at),
-                "payload": asdict(scheduled.message),
-            }
-            payload = self._context.serializer.serialize(envelope_dict)
+            payload = self._context.serializer.serialize(asdict(scheduled.message))
         elif hasattr(message, "message") and hasattr(message, "target"):
             # Defensive: support objects with message/target attributes
             resolved_topic = str(getattr(message, "target"))
             effective_deliver_at = float(getattr(message, "deliver_at"))
-            envelope_dict = {
-                "__scheduled__": True,
-                "target": getattr(message, "target"),
-                "deliver_at": float(getattr(message, "deliver_at")),
-                "payload": asdict(getattr(message, "message")),
-            }
-            payload = self._context.serializer.serialize(envelope_dict)
+            payload = self._context.serializer.serialize(asdict(getattr(message, "message")))
         else:
             payload = self._context.serializer.serialize(asdict(message))
 
         try:
             if effective_deliver_at is not None:
-                # If scheduled, add to a global scheduled ZSET
+                # Persist delayed messages transactionally so scheduler can atomically
+                # move due entries without deserializing transport payloads in Lua.
                 score = float(effective_deliver_at)
-                await self._client.zadd("broker:scheduled_messages", {payload: score})
+                token = uuid4().hex
+                async with self._client.pipeline(transaction=True) as pipeline:
+                    pipeline.hset(RedisBroker._SCHEDULED_PAYLOADS_KEY, token, payload)
+                    pipeline.hset(RedisBroker._SCHEDULED_TARGETS_KEY, token, resolved_topic)
+                    pipeline.zadd(RedisBroker._SCHEDULED_ZSET_KEY, {token: score})
+                    await pipeline.execute()
             else:
                 # Otherwise, standard immediate delivery
                 await self._client.lpush(resolved_topic, payload)
@@ -376,6 +369,12 @@ class RedisSubscriber(Subscriber):
 class RedisBroker(Broker):
     """Concrete broker implementation backed by redis.asyncio."""
 
+    _SCHEDULED_ZSET_KEY = "broker:scheduled_messages"
+    _SCHEDULED_PAYLOADS_KEY = "broker:scheduled:payloads"
+    _SCHEDULED_TARGETS_KEY = "broker:scheduled:targets"
+    _SCHEDULER_LOCK_KEY = "broker:scheduler:lock"
+    _PROCESSED_KEY_PREFIX = "broker:processed:"
+
     def __init__(self, context: BrokerContext) -> None:
         """Store context and defer I/O until connect is called.
 
@@ -384,21 +383,66 @@ class RedisBroker(Broker):
         """
 
         self.context = context
+        self._log = get_logger(self.__class__.__name__)
         self._client: redis.Redis | None = None
         self._subscriber_tasks: set[asyncio.Task[None]] = set()
         self._scheduler_task: asyncio.Task[None] | None = None
         self._subscribers: list[RedisSubscriber] = []
+        self._instance_id = uuid4().hex
+        self._scheduler_lock_held = False
+        self._scheduler_lock_ttl_ms = int(self.context.options.get("scheduler_lock_ttl_ms", 5000))
+        self._scheduler_batch_size = int(self.context.options.get("scheduler_batch_size", 100))
+        self._idempotency_ttl_sec = int(self.context.options.get("idempotency_ttl_sec", 86400))
+        observers = self.context.options.get("observers", [])
+        self._observers = list(observers) if isinstance(observers, list) else []
 
-    @property
-    def capabilities(self) -> frozenset[BrokerCapability]:
-        """Return the set of features supported by Redis broker.
-
-        Redis supports scheduled/delayed message delivery via ZSET scheduling.
-
-        Returns:
-            Immutable set containing BrokerCapability.DELAYED_DELIVERY.
+        # Compares lock owner and extends lock TTL atomically.
+        self._renew_lock_lua = """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+        end
+        return 0
         """
-        return frozenset([BrokerCapability.DELAYED_DELIVERY])
+
+        # Deletes lock only when this process owns it.
+        self._release_lock_lua = """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            return redis.call('DEL', KEYS[1])
+        end
+        return 0
+        """
+
+        # Atomically moves due scheduled messages from ZSET to target lists.
+        self._move_due_messages_lua = """
+        local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+        local moved = 0
+        for _, member in ipairs(due) do
+            local payload = redis.call('HGET', KEYS[2], member)
+            local target = redis.call('HGET', KEYS[3], member)
+
+            if payload and target then
+                redis.call('LPUSH', target, payload)
+                redis.call('ZREM', KEYS[1], member)
+                redis.call('HDEL', KEYS[2], member)
+                redis.call('HDEL', KEYS[3], member)
+                moved = moved + 1
+            else
+                local ok, decoded = pcall(cjson.decode, member)
+                if ok and type(decoded) == 'table' then
+                    if decoded['__scheduled__'] and decoded['target'] and decoded['payload'] then
+                        redis.call('LPUSH', decoded['target'], cjson.encode(decoded['payload']))
+                        redis.call('ZREM', KEYS[1], member)
+                        moved = moved + 1
+                    elseif decoded['metadata'] and decoded['metadata']['_target_topic'] then
+                        redis.call('LPUSH', decoded['metadata']['_target_topic'], member)
+                        redis.call('ZREM', KEYS[1], member)
+                        moved = moved + 1
+                    end
+                end
+            end
+        end
+        return moved
+        """
 
     async def connect(self) -> None:
         """Initialize Redis connection pool, validate connectivity, and start scheduler."""
@@ -437,6 +481,8 @@ class RedisBroker(Broker):
                 await self._scheduler_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._scheduler_task = None
 
         # 2. Cancel subscribers
         tasks = list(self._subscriber_tasks)
@@ -461,72 +507,174 @@ class RedisBroker(Broker):
             finally:
                 self._client = None
 
+    async def _acquire_scheduler_lock(self) -> bool:
+        """Try to become the active scheduler owner using a distributed Redis lock."""
+
+        client = self._require_client()
+        acquired = await client.set(
+            self._SCHEDULER_LOCK_KEY,
+            self._instance_id,
+            nx=True,
+            px=self._scheduler_lock_ttl_ms,
+        )
+        return bool(acquired)
+
+    async def _renew_scheduler_lock(self) -> bool:
+        """Extend scheduler lock TTL only when this instance still owns the lock."""
+
+        client = self._require_client()
+        renewed = await client.eval(
+            self._renew_lock_lua,
+            1,
+            self._SCHEDULER_LOCK_KEY,
+            self._instance_id,
+            str(self._scheduler_lock_ttl_ms),
+        )
+        return bool(int(renewed) if renewed is not None else 0)
+
+    async def _release_scheduler_lock(self) -> None:
+        """Release scheduler lock safely, only when owned by this instance."""
+
+        try:
+            client = self._require_client()
+            await client.eval(
+                self._release_lock_lua,
+                1,
+                self._SCHEDULER_LOCK_KEY,
+                self._instance_id,
+            )
+        except Exception:
+            # Shutdown should remain best-effort.
+            return
+
+    async def _move_due_scheduled_messages(self) -> int:
+        """Atomically move due delayed messages from ZSET into destination lists."""
+
+        client = self._require_client()
+        moved = await client.eval(
+            self._move_due_messages_lua,
+            3,
+            self._SCHEDULED_ZSET_KEY,
+            self._SCHEDULED_PAYLOADS_KEY,
+            self._SCHEDULED_TARGETS_KEY,
+            str(time.time()),
+            str(self._scheduler_batch_size),
+        )
+        return int(moved) if moved is not None else 0
+
+    async def try_acquire_idempotency(self, message_id: str) -> bool:
+        """Reserve processing slot for a message ID using SET NX with TTL."""
+
+        client = self._require_client()
+        key = f"{self._PROCESSED_KEY_PREFIX}{message_id}"
+        acquired = await client.set(key, "processing", nx=True, ex=self._idempotency_ttl_sec)
+        return bool(acquired)
+
+    async def mark_idempotency_completed(self, message_id: str) -> None:
+        """Mark a message ID as completed while preserving expiration semantics."""
+
+        client = self._require_client()
+        key = f"{self._PROCESSED_KEY_PREFIX}{message_id}"
+        await client.set(key, "completed", ex=self._idempotency_ttl_sec)
+
+    async def clear_idempotency_processing(self, message_id: str) -> None:
+        """Clear idempotency marker when processing fails and should be retriable."""
+
+        client = self._require_client()
+        key = f"{self._PROCESSED_KEY_PREFIX}{message_id}"
+        await client.delete(key)
+
+    async def _notify_runtime_event(self, *, event: str, details: dict[str, Any]) -> None:
+        """Emit adapter runtime events to optional observers when available."""
+
+        for observer in self._observers:
+            callback = getattr(observer, "on_runtime_event", None)
+            if callback is None:
+                continue
+            result = callback(event=event, details=details)
+            if isawaitable(result):
+                await result
+
     async def _run_scheduler_loop(self) -> None:
-        """Background loop that moves due messages from ZSET -> Target Redis Lists."""
-        
-        lua = r"""
-        local res = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
-        if #res == 0 then
-          return {}
-        end
-        redis.call('ZREM', KEYS[1], unpack(res))
-        return res
-        """
-        
+        """Continuously move due delayed messages while this instance owns the lock."""
+
+        lock_wait_s = 0.5
+        idle_wait_s = 0.25
+        busy_wait_s = 0.1
+        renew_interval_s = max(self._scheduler_lock_ttl_ms / 1000.0 / 3.0, 0.5)
+        last_renewal = 0.0
+
         while self._client is None:
             await asyncio.sleep(0.1)
 
-        while True:
-            try:
-                now_ts = str(time.time())
-                # Execute lua script against our global ZSET
-                raw_messages = await self._client.eval(
-                    lua, 1, "broker:scheduled_messages", now_ts, "100"
-                )
-                
-                if not raw_messages:
-                    await asyncio.sleep(1)
-                    continue
-                
-                # Route messages to their actual queues
-                for raw_body in raw_messages:
-                    serialized_payload: str | bytes
-                    if isinstance(raw_body, (bytes, str)):
-                        serialized_payload = raw_body
-                    else:
-                        serialized_payload = str(raw_body)
-                    try:
-                        loaded = self.context.serializer.deserialize(serialized_payload)
-
-                        # New transport-neutral scheduled envelope format
-                        if isinstance(loaded, dict) and loaded.get("__scheduled__"):
-                            target_topic = loaded.get("target")
-                            payload_obj = loaded.get("payload")
-                            if target_topic and payload_obj is not None:
-                                encoded_payload = self.context.serializer.serialize(payload_obj)
-                                await self._client.lpush(target_topic, encoded_payload)
+        try:
+            while True:
+                try:
+                    if not self._scheduler_lock_held:
+                        acquired = await self._acquire_scheduler_lock()
+                        if not acquired:
+                            await asyncio.sleep(lock_wait_s)
                             continue
 
-                        # Backwards-compatibility: older scheduled messages stored
-                        # the target topic inside metadata._target_topic
-                        target_topic = loaded.get("metadata", {}).get("_target_topic")
-                        if target_topic:
-                            await self._client.lpush(target_topic, serialized_payload)
-                    except Exception:
-                        continue
-                
-                await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(1)
+                        self._scheduler_lock_held = True
+                        last_renewal = time.monotonic()
+                        self._log.info("Scheduler lock acquired", instance_id=self._instance_id)
+                        await self._notify_runtime_event(
+                            event="scheduler_lock_acquired",
+                            details={"instance_id": self._instance_id},
+                        )
+
+                    now_monotonic = time.monotonic()
+                    if now_monotonic - last_renewal >= renew_interval_s:
+                        renewed = await self._renew_scheduler_lock()
+                        if not renewed:
+                            self._scheduler_lock_held = False
+                            self._log.warning("Scheduler lock lost", instance_id=self._instance_id)
+                            await self._notify_runtime_event(
+                                event="scheduler_lock_lost",
+                                details={"instance_id": self._instance_id},
+                            )
+                            await asyncio.sleep(lock_wait_s)
+                            continue
+                        last_renewal = now_monotonic
+
+                    moved = await self._move_due_scheduled_messages()
+                    if moved > 0:
+                        self._log.info("Scheduled batch moved", moved_count=moved)
+                        await self._notify_runtime_event(
+                            event="scheduler_batch_moved",
+                            details={"moved_count": moved, "instance_id": self._instance_id},
+                        )
+                        await asyncio.sleep(busy_wait_s)
+                    else:
+                        await asyncio.sleep(idle_wait_s)
+                except asyncio.CancelledError:
+                    raise
+                except RedisError:
+                    if self._scheduler_lock_held:
+                        self._scheduler_lock_held = False
+                        await self._notify_runtime_event(
+                            event="scheduler_lock_lost",
+                            details={"instance_id": self._instance_id, "reason": "redis_error"},
+                        )
+                    await asyncio.sleep(1.0)
+                except Exception:
+                    await asyncio.sleep(1.0)
+        finally:
+            if self._scheduler_lock_held:
+                await self._release_scheduler_lock()
+                self._scheduler_lock_held = False
+                await self._notify_runtime_event(
+                    event="scheduler_lock_released",
+                    details={"instance_id": self._instance_id},
+                )
 
     def get_publisher(self) -> Publisher:
         """Return a RedisPublisher bound to the active connection."""
 
         client = self._require_client()
         delegate = RedisPublisher(client=client, context=self.context)
-        return EnforcingPublisher(broker=self, delegate=delegate)
+        return EnforcingPublisher(delegate=delegate)
 
     def get_subscriber(self) -> Subscriber:
         """Return a RedisSubscriber bound to the active connection."""

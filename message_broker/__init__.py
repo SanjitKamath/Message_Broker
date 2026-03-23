@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
 	from .src.broker import MessageBroker
 	from .src.schema import DataPacket, Payload, ResponsePacket
-	from .src.core.interfaces import Message, Middleware, BrokerCapability, Broker
+	from .src.core.interfaces import Message, Middleware, Broker
 
 __all__ = [
 	"MessageBroker",
@@ -21,7 +21,6 @@ __all__ = [
 	"Payload",
 	"Message",
 	"Middleware",
-	"BrokerCapability",
 	"connect",
 ]
 
@@ -50,13 +49,12 @@ def __getattr__(name: str) -> Any:
 			"ResponsePacket": ResponsePacket,
 		}
 		return mapping[name]
-	if name in {"Message", "Middleware", "BrokerCapability"}:
-		from .src.core.interfaces import Message, Middleware, BrokerCapability
+	if name in {"Message", "Middleware"}:
+		from .src.core.interfaces import Message, Middleware
 
 		mapping = {
 			"Message": Message,
 			"Middleware": Middleware,
-			"BrokerCapability": BrokerCapability,
 		}
 		return mapping[name]
 

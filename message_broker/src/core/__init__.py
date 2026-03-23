@@ -12,7 +12,7 @@ from .exceptions import (
     MessageBrokerError,
     PublishFailedError,
 )
-from .interfaces import Broker, BrokerCapability, Message, Middleware, Publisher, Serializer, Subscriber
+from .interfaces import Broker, Message, Middleware, Publisher, Serializer, Subscriber
 from .observability import BrokerObserver, MetricsMiddleware, OpenTelemetryObserver
 from .registry import BrokerRegistry
 from .resilience import with_retries
@@ -20,7 +20,6 @@ from .serializers import JsonSerializer
 
 __all__ = [
     "Broker",
-    "BrokerCapability",
     "BrokerContext",
     "ConfigurationError",
     "ConnectionLostError",

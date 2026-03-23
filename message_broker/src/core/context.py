@@ -53,6 +53,9 @@ class BrokerContext:
         "max_retries": 3,
         "concurrency": 10,
         "max_queue_size": 100,
+        "scheduler_lock_ttl_ms": 5000,
+        "scheduler_batch_size": 100,
+        "idempotency_ttl_sec": 86400,
         "processing_timeout_ms": None,
         "handler_max_retries": 0,
         "shutdown_drain_timeout_ms": 1500,
@@ -67,7 +70,6 @@ class BrokerContext:
         "rabbitmq": 5672,
         "amqp": 5672,
         "amqps": 5671,
-        "kafka": 9092,
         "memory": 0,
     }
 
@@ -114,7 +116,7 @@ class BrokerContext:
         env_options = self._load_env_overrides(broker_name)
         
         # Separate broker-namespaced kwargs from flat global options
-        namespaced_keys = {"redis", "kafka", "rabbitmq", "memory"}
+        namespaced_keys = {"redis", "rabbitmq", "memory"}
         broker_namespaced_kwargs = {k: v for k, v in kwargs.items() if k in namespaced_keys}
         flat_kwargs = {k: v for k, v in kwargs.items() if k not in namespaced_keys}
         
@@ -251,7 +253,7 @@ class BrokerContext:
     def _validate_options(options: Mapping[str, JsonValue]) -> None:
         """Validate critical option values early for deterministic failures.
         
-        Note: Namespaced options (redis, kafka, etc.) are not validated here
+        Note: Namespaced options (redis, rabbitmq, etc.) are not validated here
         because they may contain adapter-specific arbitrary config.
         """
 
@@ -276,6 +278,24 @@ class BrokerContext:
         if isinstance(handler_max_retries, int) and handler_max_retries < 0:
             raise ConfigurationError(
                 "Option 'handler_max_retries' must be greater than or equal to zero."
+            )
+
+        scheduler_lock_ttl_ms = options.get("scheduler_lock_ttl_ms")
+        if not isinstance(scheduler_lock_ttl_ms, int) or scheduler_lock_ttl_ms <= 0:
+            raise ConfigurationError(
+                "Option 'scheduler_lock_ttl_ms' must be a positive integer."
+            )
+
+        scheduler_batch_size = options.get("scheduler_batch_size")
+        if not isinstance(scheduler_batch_size, int) or scheduler_batch_size <= 0:
+            raise ConfigurationError(
+                "Option 'scheduler_batch_size' must be a positive integer."
+            )
+
+        idempotency_ttl_sec = options.get("idempotency_ttl_sec")
+        if not isinstance(idempotency_ttl_sec, int) or idempotency_ttl_sec <= 0:
+            raise ConfigurationError(
+                "Option 'idempotency_ttl_sec' must be a positive integer."
             )
 
     """

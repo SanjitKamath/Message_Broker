@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .broker import MessageBroker
     from .schema import DataPacket, Payload, ResponsePacket
-    from .core.interfaces import Broker, BrokerCapability
+    from .core.interfaces import Broker
 
-__all__ = ["MessageBroker", "DataPacket", "ResponsePacket", "Payload", "connect", "BrokerCapability"]
+__all__ = ["MessageBroker", "DataPacket", "ResponsePacket", "Payload", "connect"]
 
 
 async def connect(connection_uri: str, **kwargs: Any) -> "Broker":
@@ -27,7 +27,7 @@ async def connect(connection_uri: str, **kwargs: Any) -> "Broker":
 
     Args:
         connection_uri: Broker URI such as `redis://localhost:6379`,
-                        `kafka://localhost:9092`, or `amqp://user:pass@localhost:5672//`.
+                        or `amqp://user:pass@localhost:5672//`.
         **kwargs: Additional options to merge with context defaults. For example,
               `timeout=10000`, `max_retries=5`, `config={...}`,
               `default_dlq_topic="events_dlq"`, or
@@ -85,9 +85,4 @@ def __getattr__(name: str) -> Any:
             "ResponsePacket": ResponsePacket,
         }
         return mapping[name]
-    if name == "BrokerCapability":
-        from .core.interfaces import BrokerCapability
-
-        return BrokerCapability
-
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
