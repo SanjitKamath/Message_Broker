@@ -6,4 +6,9 @@ transports while keeping each adapter module independent.
 
 from .redis import RedisBroker
 
-__all__ = ["RedisBroker"]
+try:
+	from .rabbit import RabbitMQBroker
+except ModuleNotFoundError:
+	RabbitMQBroker = None  # type: ignore[assignment]
+
+__all__ = ["RedisBroker", "RabbitMQBroker"]

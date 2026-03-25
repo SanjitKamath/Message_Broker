@@ -8,6 +8,7 @@ authors = [ { name = "LYIK" } ]
 
 dependencies = [
     "redis[asyncio]>=5.0.0",
+    "aio-pika>=9.4.0",
     "pydantic>=2.0.0",
     "structlog>=24.1.0",
     "colorama>=0.4.6",
@@ -21,6 +22,7 @@ otel = [
 
 [project.entry-points."message_broker.adapters"]
 redis = "message_broker.adapters.redis:redis_factory"
+rabbitmq = "message_broker.adapters.rabbit:rabbitmq_factory"
 
 [tool.setuptools]
 packages = [

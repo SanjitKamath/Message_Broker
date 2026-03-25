@@ -5,3 +5,4 @@
 
 -e ./message_broker
 redis>=4.6.0
+aio-pika>=9.4.0
