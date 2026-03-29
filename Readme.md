@@ -90,18 +90,140 @@ asyncio.run(main())
 # 🧩 Architecture Overview
 
 ```
-Application Layer
-      ↓
-MessageBroker (High-Level API)
-      ↓
-Core Layer (Interfaces, Context, Registry)
-      ↓
-Adapters (Redis, Custom)
-      ↓
-Actual Broker (Redis/etc.)
+Producer
+  ↓
+Message(payload)
+  ↓
+serialize (JSON)
+  ↓
+Adapter publish
+  ↓
+Queue / Redis list / delay system
+  ↓
+Subscriber receives
+  ↓
+deserialize → Message
+  ↓
+middleware.after_consume
+  ↓
+your handler(message)
 ```
 
 ---
+
+# ✨ How it Works
+
+```mermaid
+flowchart TD
+
+%% =========================
+%% PRODUCER FLOW
+%% =========================
+
+subgraph PRODUCER [Producer Flow]
+    P1["Your Code: send_message or send_and_wait"]
+
+    P2["broker.py: MessageBroker.__init__"]
+    P3["core/context.py: BrokerContext - parse URI"]
+    P4["core/registry.py: BrokerRegistry.create"]
+    P5["Adapter: Broker instance - Redis, RabbitMQ, etc."]
+
+    P6["broker.py: connect()"]
+    P7["Adapter: establish connection"]
+    P8["Adapter: get_publisher"]
+
+    P9["broker.py: send_message or send_and_wait"]
+    P10["broker.py: build and publish packet"]
+
+    P11["schema.py: DataPacket creation"]
+    P12["core/interfaces.py: Message creation"]
+    P13["core/interfaces.py: correlation_id injection"]
+
+    P14["core/interfaces.py: EnforcingPublisher"]
+    P15["core/observability.py: before_publish middleware"]
+
+    P16{"Delayed delivery?"}
+    P17["core/interfaces.py: ScheduledEnvelope"]
+
+    P18["core/resilience.py: with_retries"]
+    P19["core/serializers.py: serialize message"]
+
+    P20["Adapter Publisher: publish()"]
+    P21["Underlying Broker System"]
+
+    P1 --> P2 --> P3 --> P4 --> P5
+    P5 --> P6 --> P7 --> P8
+    P8 --> P9 --> P10
+    P10 --> P11 --> P12 --> P13
+    P13 --> P14 --> P15
+
+    P15 --> P16
+    P16 -- Yes --> P17 --> P18
+    P16 -- No --> P18
+
+    P18 --> P19 --> P20 --> P21
+end
+
+%% =========================
+%% BROKER / QUEUE
+%% =========================
+
+subgraph BROKER [Broker Queue System]
+    Q1["Message stored in queue"]
+    Q2["Optional scheduler for delayed messages"]
+
+    Q1 --> Q2
+end
+
+P21 --> Q1
+
+%% =========================
+%% CONSUMER FLOW
+%% =========================
+
+subgraph CONSUMER [Consumer Flow]
+    C1["Your Code: on_message handler"]
+
+    C2["broker.py: on_message()"]
+    C3["broker.py: make message wrapper"]
+
+    C4["broker.py: connect()"]
+    C5["Adapter: connect and get subscriber"]
+
+    C6["Adapter Subscriber: subscribe()"]
+    C7["Adapter: receive message"]
+
+    C8["core/serializers.py: deserialize"]
+    C9["core/interfaces.py: Message reconstruction"]
+
+    C10["core/observability.py: after_consume middleware"]
+
+    C11["broker.py: wrapper(msg)"]
+    C12["schema.py: DataPacket creation"]
+
+    C13["broker.py: idempotency and validation"]
+    C14["broker.py: execute user handler"]
+
+    C15{"Reply required?"}
+    C16["broker.py: publish response"]
+    C17["Re-enter Producer Flow"]
+    C18["End"]
+
+    C1 --> C2 --> C3
+    C3 --> C4 --> C5
+    C5 --> C6 --> C7
+
+    C7 --> C8 --> C9 --> C10
+    C10 --> C11 --> C12
+    C12 --> C13 --> C14
+
+    C14 --> C15
+    C15 -- Yes --> C16 --> C17
+    C15 -- No --> C18
+end
+
+Q1 --> C7
+```
 
 ## 📂 Folder Structure
 
