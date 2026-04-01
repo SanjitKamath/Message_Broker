@@ -30,19 +30,11 @@ The framework focuses on operational concerns that are usually repeated in each 
 ## Installation
 
 ```bash
-git clone https://github.com/SanjitKamath/Message_Broker.git
-cd message_broker
+pip install 'git+https://github.com/SanjitKamath/Message_Broker.git'
 
-python -m venv .venv
-# Linux/macOS
-source .venv/bin/activate
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
+or if you wish to install with Open Telemtry
 
-pip install -e .
-
-# Optional OpenTelemetry support
-pip install -e .[otel]
+pip install 'git+https://github.com/SanjitKamath/Message_Broker.git#egg=message_broker[otel]'
 ```
 
 ## Quick Start
