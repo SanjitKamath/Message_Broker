@@ -1,3 +1,7 @@
+"""
+Application logging configuration and utilities.
+This module sets up structlog for structured logging and provides a helper function to retrieve configured loggers.
+"""
 import structlog
 
 # Configure structlog once at module import time. Calling `configure`

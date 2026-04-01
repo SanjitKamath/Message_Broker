@@ -1,7 +1,13 @@
-"""Observability extension points for broker operations.
+"""
+Observability extension points for broker operations.
 
 This module keeps observability optional and transport-agnostic. Integrations
 can implement the observer protocol directly or use provided middleware/helpers.
+
+Observability refers to the ability to monitor and measure the behavior of the message broker, including
+metric like the time taken to publish messages, the latency of message handling, and the occurrence of retry attempts. 
+By providing hooks for these events, users can integrate with various monitoring and tracing systems to gain insights 
+into the performance and reliability of their messaging infrastructure.
 """
 
 from __future__ import annotations
@@ -15,10 +21,18 @@ from .interfaces import Message, Middleware
 
 @runtime_checkable
 class BrokerObserver(Protocol):
-    """Protocol for optional publish/consume/retry instrumentation hooks."""
+    """
+    Protocol for optional publish/consume/retry instrumentation hooks.
+    Observers can be registered on a per-message basis through `message.metadata["observers"]` or globally
+    through broker configuration. All observer methods are best-effort and should not raise exceptions.
+    """
 
     def on_publish(self, *, topic: str, elapsed_ms: float, message: Message) -> None | Awaitable[None]:
-        """Record time spent publishing a message."""
+        """
+        Record time spent publishing a message. Called after the publish operation completes, regardless of success or failure.
+        The `elapsed_ms` parameter represents the time taken to complete the publish operation in milliseconds.
+        This allows observers to track the performance of the publishing process and identify any potential bottlenecks or issues.
+        """
 
     def on_handler_execution(
         self,
@@ -28,7 +42,13 @@ class BrokerObserver(Protocol):
         message: Message,
         status: str,
     ) -> None | Awaitable[None]:
-        """Record handler execution timing and completion status."""
+        """
+        Record handler execution timing and completion status. Called after a message handler finishes processing, regardless of 
+        success or failure. The `elapsed_ms` parameter represents the time taken to execute the handler in milliseconds, 
+        while the `status` parameter indicates the outcome of the handler execution (e.g., "success", "error", "retry"). 
+        This allows observers to monitor the performance of message handling and identify any issues or patterns related to 
+        handler execution.
+        """
 
     def on_retry_attempt(
         self,
@@ -42,7 +62,8 @@ class BrokerObserver(Protocol):
 
 
 class MetricsMiddleware(Middleware):
-    """Middleware that records queue transit latency and consume counts.
+    """
+    Middleware that records queue transit latency and consume counts.
 
     The middleware itself is storage-agnostic. It emits measurements to any
     configured observers in `message.metadata["observers"]` when present.
@@ -70,6 +91,13 @@ class MetricsMiddleware(Middleware):
 
 class OpenTelemetryObserver:
     """Best-effort OpenTelemetry observer.
+
+    This helps users get started with OpenTelemetry without needing to implement the full protocol.
+
+    OpenTelemetry is a popular open-source observability framework that provides tools and APIs for collecting 
+    and exporting telemetry data, such as traces, metrics, and logs. By implementing the `BrokerObserver` protocol, 
+    this class allows users to automatically emit OpenTelemetry spans for key broker operations like 
+    publishing messages, executing handlers, and retry attempts.
 
     This class has no hard dependency on OpenTelemetry. If the package is not
     installed, methods become no-ops.
@@ -113,7 +141,11 @@ class OpenTelemetryObserver:
         message: Message,
         status: str,
     ) -> None:
-        """Emit handler timing spans when OpenTelemetry is available."""
+        """
+        Emit handler timing spans when OpenTelemetry is available. This ensures that we can track the full 
+        end-to-end latency of messages, including time spent in queues and handlers, as well as the final 
+        outcome of the handler execution.
+        """
 
         self._record(
             "message.handle",

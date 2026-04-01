@@ -26,7 +26,17 @@ __all__ = [
 
 
 async def connect(connection_uri: str, **kwargs: Any) -> "Broker":
-	"""Initialize a broker from a URI with automatic adapter selection."""
+	"""
+	Initialize a broker from a URI with automatic adapter selection.
+	- The URI scheme determines the adapter (e.g., "redis://..." uses the Redis adapter).
+	- Optional kwargs are passed to the adapter's connection method.
+	- Some of the additional kwargs may be as follows:
+		- `middlewares`: List of middleware instances to apply to the broker.
+		- `logger`: Optional logger instance for adapter logging.
+		- `timeout`: Optional default timeout for broker operations (in milliseconds).
+		- `max_retries`: Optional retry count for transient connection failures.
+		- `observers`: Optional list of observability callbacks for message lifecycle events.
+	"""
 
 	from .src import connect as _connect
 

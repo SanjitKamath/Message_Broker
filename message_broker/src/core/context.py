@@ -1,7 +1,12 @@
-"""Connection context for broker adapters.
+"""
+Connection context for broker adapters.
 
 This module centralizes URI parsing and option normalization so every adapter
 inherits consistent behavior for defaults, security inference, and validation.
+
+Helps users by providing a single source of truth for connection settings, preventing
+copy-pasted parsing logic across adapters, and keeping adapter code focused on transport 
+operations instead of configuration plumbing.
 """
 
 from __future__ import annotations
@@ -44,8 +49,10 @@ class BrokerContext:
         timeout: Connection and operation timeout in milliseconds.
 
     Example:
+    ```
         context = BrokerContext("redis://localhost:6379/0", timeout=3000)
         assert context.broker_name == "redis"
+    ```
     """
 
     DEFAULT_OPTIONS: ClassVar[dict[str, JsonValue]] = {
@@ -102,6 +109,8 @@ class BrokerContext:
                 "Connection URI must include a scheme (for example redis://)."
             )
 
+        # Normalize scheme and broker name, infer security requirement, parse host/port/auth/vhost, 
+        # and merge options from defaults, URI query, env vars, and kwargs.
         scheme = parsed.scheme.lower()
         broker_name = self._normalize_broker_name(scheme)
         secure = self._is_secure_scheme(scheme)
@@ -111,6 +120,8 @@ class BrokerContext:
         password = unquote(parsed.password) if parsed.password is not None else None
         virtual_host = parsed.path.lstrip("/") or None
 
+        # Validate critical options early for deterministic failures. This prevents the broker from 
+        # starting with invalid configuration, which could lead to more complex errors later on when operations are attempted.
         query_options = self._parse_query_options(parsed.query)
         config_options = self._extract_config_options(kwargs)
         env_options = self._load_env_overrides(broker_name)
@@ -185,7 +196,8 @@ class BrokerContext:
         )
 
     """
-    This class method resolves the effective port number for the connection. It first checks if the URI includes an explicit port. If not, it looks up a default port
+    This class method resolves the effective port number for the connection. 
+    It first checks if the URI includes an explicit port. If not, it looks up a default port
     based on the scheme or broker name.
     """
     @classmethod
@@ -199,9 +211,10 @@ class BrokerContext:
         return 0
 
     """
-    This method parses the query string from the URI and converts it into a dictionary of options. It uses the parse_qs function to handle URL-encoded query parameters 
-    and then applies a coercion function to convert string values into appropriate Python types (like int, bool, etc.). This allows users to specify configuration 
-    options directly in the URI query string in a flexible way.
+    This method parses the query string from the URI and converts it into a dictionary of options. It uses the parse_qs 
+    function to handle URL-encoded query parameters and then applies a coercion function to convert string values into 
+    appropriate Python types (like int, bool, etc.). This allows users to specify configuration options directly in the 
+    URI query string in a flexible way.
     """
     @classmethod
     def _parse_query_options(cls, query: str) -> dict[str, JsonValue]:
@@ -220,13 +233,24 @@ class BrokerContext:
         return options
 
     """
-    This static method takes a raw string value and attempts to coerce it into a more specific Python type. It handles common cases like "true"/"false" for booleans,
-    and tries to convert numeric strings into int or float. If it cannot coerce the value into a more specific type, it returns the original string. This is useful for
-    interpreting configuration options that are provided as strings (for example, from environment variables or query parameters) into their intended types.
+    This static method takes a raw string value and attempts to coerce it into a more specific Python type. 
+    It handles common cases like "true"/"false" for booleans, and tries to convert numeric strings into int or float. 
+    If it cannot coerce the value into a more specific type, it returns the original string. This is useful for
+    interpreting configuration options that are provided as strings (for example, from environment variables or 
+    query parameters) into their intended types.
     """
     @staticmethod
     def _coerce_scalar(raw_value: str) -> JsonValue:
-        """Convert common scalar string values to typed Python values."""
+        """
+        Convert common scalar string values to typed Python values.
+
+        For example:
+            - "true" -> True
+            - "false" -> False  
+            - "42" -> 42
+            - "3.14" -> 3.14
+            - "hello" -> "hello"      
+        """
 
         value = raw_value.strip()
         lowered = value.lower()
@@ -245,14 +269,23 @@ class BrokerContext:
             return value
 
     """
-    This static method validates critical option values to ensure they meet expected criteria (like being positive integers). It raises a ConfigurationError if any 
-    of the options are invalid. This early validation helps catch misconfigurations before the broker starts processing messages, leading to more deterministic failures 
-    and easier debugging.
+    This static method validates critical option values to ensure they meet expected criteria (like being positive integers). 
+    It raises a ConfigurationError if any of the options are invalid. This early validation helps catch misconfigurations 
+    before the broker starts processing messages, leading to more deterministic failures and easier debugging.
     """
     @staticmethod
     def _validate_options(options: Mapping[str, JsonValue]) -> None:
-        """Validate critical option values early for deterministic failures.
-        
+        """
+        Validate critical option values early for deterministic failures.
+        For example:
+            - timeout must be a positive integer
+            - max_retries must be a non-negative integer
+            - processing_timeout_ms must be a positive integer
+            - handler_max_retries must be a non-negative integer
+            - scheduler_lock_ttl_ms must be a positive integer
+            - scheduler_batch_size must be a positive integer
+            - idempotency_ttl_sec must be a positive integer
+
         Note: Namespaced options (redis, rabbitmq, etc.) are not validated here
         because they may contain adapter-specific arbitrary config.
         """
@@ -299,10 +332,10 @@ class BrokerContext:
             )
 
     """
-    This method is responsible for extracting a configuration object from the keyword arguments passed to the BrokerContext constructor. 
-    It looks for a "config" key in the kwargs, and if it finds one, it attempts to normalize it into a plain dictionary. This allows users 
-    to pass in configuration using various formats (like Pydantic models or other mapping-like objects) while ensuring that the BrokerContext 
-    can work with it in a consistent way.
+    This method is responsible for extracting a configuration object from the keyword arguments passed to the BrokerContext 
+    constructor. It looks for a "config" key in the kwargs, and if it finds one, it attempts to normalize it into a plain 
+    dictionary. This allows users to pass in configuration using various formats (like Pydantic models or other mapping-like 
+    objects) while ensuring that the BrokerContext can work with it in a consistent way.
     """
     @classmethod
     def _extract_config_options(cls, kwargs: dict[str, Any]) -> dict[str, JsonValue]:
@@ -328,13 +361,17 @@ class BrokerContext:
         raise ConfigurationError("Option 'config' must be a mapping-like object.")
 
     """ 
-    This class method loads optional overrides from environment variables. It supports both global and broker-specific forms, allowing users to specify configuration
-    options in the environment that can override defaults and URI query parameters. The method checks for environment variables in the format of "MB_{OPTION}" for global 
-    overrides, and "MB_{BROKER}_{OPTION}" for broker-specific overrides, where {OPTION} is the uppercase name of the option and {BROKER} is the uppercase name of the broker. 
-    It then coerces the raw string values from the environment into appropriate Python types using the _coerce_scalar method"""
+    This class method loads optional overrides from environment variables. It supports both global and broker-specific forms, 
+    allowing users to specify configuration options in the environment that can override defaults and URI query parameters. 
+    The method checks for environment variables in the format of "MB_{OPTION}" for global overrides, and "MB_{BROKER}_{OPTION}" 
+    for broker-specific overrides, where {OPTION} is the uppercase name of the option and {BROKER} is the uppercase name of the 
+    broker. It then coerces the raw string values from the environment into appropriate Python types using the _coerce_scalar 
+    method
+    """
     @classmethod
     def _load_env_overrides(cls, broker_name: str) -> dict[str, JsonValue]:
-        """Load optional overrides from environment variables.
+        """
+        Load optional overrides from environment variables.
 
         Supports both global and broker-specific forms:
         - MB_TIMEOUT=5000

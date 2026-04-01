@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, TypeAlias
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # JSON-like payload used throughout the package.
@@ -27,37 +27,155 @@ def _utc_now() -> datetime:
 
 
 class DataPacket(BaseModel):
-    """Request envelope sent through a queue.
+    """
+    Request envelope used by handlers and transport adapters.
 
-    Fields:
-    - `id`: Unique message identifier.
-    - `sender`: Name of the producing service or application.
-    - `content`: JSON-like payload for business data.
-    - `correlation_id`: Tracks request/response pairs.
-    - `reply_to`: Queue name where a response should be published.
+    This model is the canonical request shape passed to user-defined message
+    handlers. It captures business payload plus correlation/routing metadata.
+
+    Arguments:
+        - `id` Unique packet identifier, usually a UUID string. Auto-generated if not provided.
+        - `sender` Logical producer identifier (e.g., service/app name). Required.
+        - `content` Business payload consumed by handlers. Accepts dict/list primitives or scalar JSON-like values. Required.
+        - `correlation_id` Correlation token linking request and response across hops. Auto-generated if not provided.
+        - `reply_to` Queue/topic where the receiver should publish a ResponsePacket. Optional; leave null for fire-and-forget messages.
+        - `deliver_at` Optional timezone-aware UTC datetime for delayed delivery. When omitted, the message is delivered immediately.
+
+    Example:
+        ```
+        DataPacket(
+            sender="billing-api",
+            content={"event": "invoice.created", "invoice_id": "inv_123"},
+            reply_to="reply_queue_a1b2c3",
+        )
+        ```
     """
 
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique ID for the packet")
-    sender: str = Field(..., min_length=3, description="Producer name or service identifier")
-    content: Payload = Field(..., description="JSON-like message payload")
-    correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Correlation ID for responses")
-    reply_to: str | None = Field(None, description="Reply queue name where producer listens for responses")
-    deliver_at: datetime | None = Field(None, description="UTC datetime for scheduled delivery")
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "id": "5d8ecf9f-4719-4be2-a7bb-e2e7cb53a077",
+                    "sender": "orders-service",
+                    "content": {"event": "order.created", "order_id": 101},
+                    "correlation_id": "d31f84f093074f3d8e83f0e8dd8ebd5f",
+                    "reply_to": "orders-replies",
+                }
+            ]
+        }
+    )
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique packet identifier, usually a UUID string.",
+        examples=["5d8ecf9f-4719-4be2-a7bb-e2e7cb53a077"],
+    )
+    sender: str = Field(
+        ...,
+        min_length=3,
+        description=(
+            "Logical producer identifier (service/app name). "
+            "Examples: 'orders-service', 'billing-api', 'worker-1'."
+        ),
+        examples=["orders-service"],
+    )
+    content: Payload = Field(
+        ...,
+        description=(
+            "Business payload consumed by handlers. Accepts dict/list primitives "
+            "or scalar JSON-like values."
+        ),
+        examples=[{"event": "order.created", "order_id": 101}],
+    )
+    correlation_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description=(
+            "Correlation token linking request and response across hops. "
+            "Populate this when continuing an existing trace."
+        ),
+        examples=["d31f84f093074f3d8e83f0e8dd8ebd5f"],
+    )
+    reply_to: str | None = Field(
+        None,
+        description=(
+            "Queue/topic where the receiver should publish a ResponsePacket. "
+            "Leave null for fire-and-forget messages."
+        ),
+        examples=["orders-replies"],
+    )
+    deliver_at: datetime | None = Field(
+        None,
+        description=(
+            "Optional timezone-aware UTC datetime for delayed delivery. "
+            "When omitted, the message is delivered immediately."
+        ),
+        examples=["2026-03-30T12:30:00Z"],
+    )
 
 
 class ResponsePacket(BaseModel):
-    """Response envelope published back to a caller queue.
+    """
+    Response envelope published to reply queues.
 
-    Fields:
-    - `correlation_id`: Correlation ID from the original request.
-    - `in_response_to`: Original request packet id.
-    - `status`: Processing status, for example `processed` or `failed`.
-    - `content`: JSON-like response payload.
-    - `processed_at`: UTC timestamp when response was created.
+    Responses are correlated to the originating request using `correlation_id`.
+
+    Arguments:
+        - `correlation_id` Correlation ID copied from the originating DataPacket. Required for traceability.
+        - `in_response_to` Identifier of the original DataPacket (`DataPacket.id`). Required for direct correlation.
+        - `status` Outcome label from the handler. Common values are 'processed' and 'failed', but custom status strings are allowed. Required.
+        - `content` Response payload body returned by the handler. Accepts dict/list primitives or scalar JSON-like values. Optional; can be null if no response body is needed.
+        - `processed_at` Timezone-aware UTC timestamp when this response was created. Auto-generated at instantiation.
+
+    Example:
+    ```
+        ResponsePacket(
+            correlation_id="d31f84f093074f3d8e83f0e8dd8ebd5f",
+            in_response_to="5d8ecf9f-4719-4be2-a7bb-e2e7cb53a077",
+            status="processed",
+            content={"ok": True},
+        )
+    ```
     """
 
-    correlation_id: str = Field(..., description="Correlation id copied from original message")
-    in_response_to: str = Field(..., description="Original DataPacket.id")
-    status: str = Field(..., description="Processing status or short response")
-    content: Payload = Field(default=None, description="JSON-like response payload")
-    processed_at: datetime = Field(default_factory=_utc_now, description="UTC time when response was created")
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "correlation_id": "d31f84f093074f3d8e83f0e8dd8ebd5f",
+                    "in_response_to": "5d8ecf9f-4719-4be2-a7bb-e2e7cb53a077",
+                    "status": "processed",
+                    "content": {"ok": True},
+                    "processed_at": "2026-03-30T12:30:04Z",
+                }
+            ]
+        }
+    )
+
+    correlation_id: str = Field(
+        ...,
+        description="Correlation ID copied from the originating DataPacket.",
+        examples=["d31f84f093074f3d8e83f0e8dd8ebd5f"],
+    )
+    in_response_to: str = Field(
+        ...,
+        description="Identifier of the original DataPacket (`DataPacket.id`).",
+        examples=["5d8ecf9f-4719-4be2-a7bb-e2e7cb53a077"],
+    )
+    status: str = Field(
+        ...,
+        description=(
+            "Outcome label from the handler. Common values are 'processed' and "
+            "'failed', but custom status strings are allowed."
+        ),
+        examples=["processed"],
+    )
+    content: Payload = Field(
+        default=None,
+        description="Response payload body returned by the handler.",
+        examples=[{"ok": True}],
+    )
+    processed_at: datetime = Field(
+        default_factory=_utc_now,
+        description="Timezone-aware UTC timestamp when this response was created.",
+        examples=["2026-03-30T12:30:04Z"],
+    )

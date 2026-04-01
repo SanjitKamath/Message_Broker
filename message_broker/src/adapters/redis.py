@@ -1,4 +1,5 @@
-"""Redis adapter built on redis.asyncio queue primitives.
+"""
+Redis adapter built on redis.asyncio queue primitives.
 
 This adapter uses Redis lists as simple FIFO queues. It intentionally avoids
 higher-level frameworks so broker behavior stays explicit and transport-neutral.
@@ -60,7 +61,8 @@ class RedisPublisher(Publisher):
         timeout_ms: int | None = None,
         deliver_at: float | None = None,
     ) -> None:
-        """Serialize and enqueue a message into a Redis topic list.
+        """
+        Serialize and enqueue a message into a Redis topic list.
 
         If `deliver_at` is provided, schedules the message in a global ZSET
         instead of pushing it immediately. The scheduled message will be moved

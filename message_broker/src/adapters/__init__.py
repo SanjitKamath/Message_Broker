@@ -1,4 +1,5 @@
-"""Transport adapter implementations.
+"""
+Transport adapter implementations.
 
 Importing this package triggers adapter self-registration for available
 transports while keeping each adapter module independent.

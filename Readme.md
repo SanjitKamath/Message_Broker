@@ -1,486 +1,349 @@
-# 🚀 message_broker — Enterprise Async Messaging Framework
+# message_broker
 
-> A transport-agnostic, asyncio-native messaging framework designed for **high-performance, scalable, and resilient distributed systems**.
+Async, transport-agnostic messaging framework for event processing, delayed delivery, and RPC-style request/response.
 
----
+## Overview
 
-## 📖 Overview
+message_broker provides a single API for working with different messaging backends. Application code interacts with MessageBroker, while adapters implement broker-specific behavior.
 
-`message_broker` is a **production-grade messaging abstraction layer** that lets you build asynchronous, event-driven systems **without coupling your application to a specific broker**.
+The framework focuses on operational concerns that are usually repeated in each service:
 
-Instead of writing broker-specific code, you write against a **unified interface**, and the framework handles:
+- message envelope validation
+- retry behavior and timeout controls
+- bounded consumer queues (backpressure)
+- delayed delivery
+- request-response correlation
+- middleware hooks and observer integration
 
-* connection management
-* serialization
-* retries & resilience
-* backpressure
-* observability
-* broker capability differences
+## Features
 
----
+- Async-first API built on asyncio
+- Transport abstraction with pluggable adapters
+- Built-in message envelopes with Pydantic validation
+- Fire-and-forget and RPC workflows
+- Delayed delivery support
+- Backpressure controls through bounded consumer queues
+- Retry/timeouts for transport and handler execution
+- Middleware and observer extension points
+- Plugin-based adapter discovery via registry
 
-## 🎯 What It Solves
-
-* Tight coupling to broker-specific APIs
-* Inconsistent retry/error handling
-* Lack of backpressure → memory crashes
-* Hard-to-maintain messaging logic
-
-✔️ Provides:
-
-* clean abstraction layer
-* pluggable adapters
-* safe async processing
-* enterprise-level features out of the box
-
----
-
-## ✨ Core Features
-
-* 🔌 **Pluggable Broker Adapters** (Redis, extensible)
-* ⚡ **Async-first architecture** (`asyncio` native)
-* 🧠 **Backpressure-aware consumers**
-* 🔁 **Retry with exponential backoff**
-* 📡 **Observability hooks (OpenTelemetry ready)**
-* 🧩 **Middleware system**
-* 🧱 **Strict typing & schema validation**
-* ⏰ **Built-in delayed delivery support**
-* 🔄 **Built-in RPC (request-response pattern)**
-
----
-
-## 📦 Installation
+## Installation
 
 ```bash
 git clone https://github.com/SanjitKamath/Message_Broker.git
 cd message_broker
 
 python -m venv .venv
-source .venv/bin/activate   # Windows: .\.venv\Scripts\activate
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
 
 pip install -e .
 
-# Optional (OpenTelemetry)
+# Optional OpenTelemetry support
 pip install -e .[otel]
 ```
 
----
-
-## ⚡ Quick Example
+## Quick Start
 
 ```python
 import asyncio
 from message_broker import MessageBroker
 
-async def main():
-    broker = MessageBroker("redis://127.0.0.1:6379")
 
-    @broker.on_message
-    async def handle(data):
-        print(data.content)
-        return {"status": "ok"}
+async def main() -> None:
+  broker = MessageBroker("redis://localhost:6379", queue_name="jobs")
 
-    await broker.start()
+  @broker.on_message
+  async def handle(packet):
+    print("received:", packet.content)
+    return {"ok": True}
 
-asyncio.run(main())
+  await broker.connect()
+
+  run_task = asyncio.create_task(broker.start())
+  await broker.send_message(content={"job": "sync"}, sender="example-client")
+
+  await asyncio.sleep(1)
+  run_task.cancel()
+  try:
+    await run_task
+  except asyncio.CancelledError:
+    pass
+
+
+if __name__ == "__main__":
+  asyncio.run(main())
 ```
 
----
+## Core Concepts Explained
 
-# 🧩 Architecture Overview
+1. Startup lifecycle:
+   create MessageBroker -> connect() -> register handlers -> start()
+2. Send path:
+   send_message()/send_and_wait() builds a DataPacket, wraps it into a Message, applies before_publish middleware, then publishes through the adapter.
+3. Receive path:
+   adapter receives payload -> deserializes to Message -> applies after_consume middleware -> broker validates DataPacket -> user handler executes.
+4. Reply path:
+   if reply_to is present, handler output is wrapped in ResponsePacket and published to the reply queue.
+5. Correlation:
+   correlation_id is generated or propagated and used for tracing plus RPC response matching.
 
+## API Reference
+
+### High-Level API
+
+| Method | Input | Output | Description | When to use |
+| ------ | ----- | ------ | ----------- | ----------- |
+| MessageBroker(connection_uri, queue_name="default_queue", **context_options) | URI, default queue, context options | MessageBroker instance | Creates broker facade and resolves adapter from URI scheme. | Every application entry point. |
+| connect() | None | None | Opens transport connection and initializes publisher/subscriber. | Before publishing/subscribing. |
+| start() | None | None (long-running) | Subscribes to message and reply queues, then keeps consume loop alive. | Consumer services and workers. |
+| disconnect() | None | None | Cancels active tasks, resolves pending RPC waiters, and closes transport resources. | Graceful shutdown or service stop. |
+| send_message(content, sender, reply=False, deliver_at=None) | Payload, sender id, optional reply flag, optional datetime | correlation_id (str) | Publishes DataPacket to configured queue. | Fire-and-forget and one-way events. |
+| send_and_wait(content, sender, timeout=None, deliver_at=None) | Payload, sender id, optional timeout seconds, optional datetime | ResponsePacket | Publishes request and waits for matching reply by correlation_id. | RPC-style request-response. |
+| on_message(handler=None) | Handler or decorator usage | Adapter-facing wrapper function | Registers request handler for inbound DataPacket messages. | Main consumer logic. |
+| on_reply(handler=None) | Handler or decorator usage | Adapter-facing wrapper function | Registers reply handler for inbound ResponsePacket messages. | Optional reply-side processing and RPC observability. |
+
+### Handler Contracts
+
+| Handler Type | Input | Return | Sync/Async Support |
+| ------------ | ----- | ------ | ------------------ |
+| Message handler (on_message) | DataPacket | Payload \| None | Supports both sync and async handlers. |
+| Reply handler (on_reply) | ResponsePacket | None | Supports both sync and async handlers. |
+
+Notes:
+
+- Message handlers may return payload data. If the incoming packet has reply_to, that return value is published as a ResponsePacket.
+- Returning None is valid, especially for fire-and-forget consumers.
+- Reply handlers are typically used for side effects (logging, metrics, custom response handling).
+
+## Usage Patterns
+
+### 1. Fire-and-Forget
+
+Use when the sender does not need an immediate response.
+
+```python
+await broker.send_message(
+  content={"event": "invoice.created", "invoice_id": "inv_123"},
+  sender="billing-service",
+)
 ```
-Producer
-  ↓
-Message(payload)
-  ↓
-serialize (JSON)
-  ↓
-Adapter publish
-  ↓
-Queue / Redis list / delay system
-  ↓
-Subscriber receives
-  ↓
-deserialize → Message
-  ↓
-middleware.after_consume
-  ↓
-your handler(message)
+
+When to use:
+
+- domain events
+- audit/event streams
+- asynchronous background triggers
+
+### 2. Delayed Messaging
+
+Use when work should be executed at or after a specific time.
+
+```python
+from datetime import datetime, timedelta, timezone
+
+await broker.send_message(
+  content={"task": "retry-payment", "order_id": "ord_77"},
+  sender="scheduler",
+  deliver_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+)
 ```
 
----
+When to use:
 
-# ✨ How it Works
+- deferred retries
+- scheduled notifications
+- cooldown or delay windows
+
+### 3. Request-Response (RPC)
+
+Use when the caller must wait for a typed response.
+
+```python
+response = await broker.send_and_wait(
+  content={"operation": "healthcheck"},
+  sender="api-gateway",
+  timeout=3.0,
+)
+
+print(response.status, response.content)
+```
+
+When to use:
+
+- command validation requiring immediate result
+- service orchestration with bounded timeout
+- bridge flows where async transport backs sync APIs
+
+## Architecture
+
+The framework separates application-level packet handling from transport-level publish/consume primitives. Your code interacts with MessageBroker and handlers; adapters handle broker details.
 
 ```mermaid
-flowchart TD
-
-%% =========================
-%% PRODUCER FLOW
-%% =========================
-
-subgraph PRODUCER [Producer Flow]
-    P1["Your Code: send_message or send_and_wait"]
-
-    P2["broker.py: MessageBroker.__init__"]
-    P3["core/context.py: BrokerContext - parse URI"]
-    P4["core/registry.py: BrokerRegistry.create"]
-    P5["Adapter: Broker instance - Redis, RabbitMQ, etc."]
-
-    P6["broker.py: connect()"]
-    P7["Adapter: establish connection"]
-    P8["Adapter: get_publisher"]
-
-    P9["broker.py: send_message or send_and_wait"]
-    P10["broker.py: build and publish packet"]
-
-    P11["schema.py: DataPacket creation"]
-    P12["core/interfaces.py: Message creation"]
-    P13["core/interfaces.py: correlation_id injection"]
-
-    P14["core/interfaces.py: EnforcingPublisher"]
-    P15["core/observability.py: before_publish middleware"]
-
-    P16{"Delayed delivery?"}
-    P17["core/interfaces.py: ScheduledEnvelope"]
-
-    P18["core/resilience.py: with_retries"]
-    P19["core/serializers.py: serialize message"]
-
-    P20["Adapter Publisher: publish()"]
-    P21["Underlying Broker System"]
-
-    P1 --> P2 --> P3 --> P4 --> P5
-    P5 --> P6 --> P7 --> P8
-    P8 --> P9 --> P10
-    P10 --> P11 --> P12 --> P13
-    P13 --> P14 --> P15
-
-    P15 --> P16
-    P16 -- Yes --> P17 --> P18
-    P16 -- No --> P18
-
-    P18 --> P19 --> P20 --> P21
-end
-
-%% =========================
-%% BROKER / QUEUE
-%% =========================
-
-subgraph BROKER [Broker Queue System]
-    Q1["Message stored in queue"]
-    Q2["Optional scheduler for delayed messages"]
-
-    Q1 --> Q2
-end
-
-P21 --> Q1
-
-%% =========================
-%% CONSUMER FLOW
-%% =========================
-
-subgraph CONSUMER [Consumer Flow]
-    C1["Your Code: on_message handler"]
-
-    C2["broker.py: on_message()"]
-    C3["broker.py: make message wrapper"]
-
-    C4["broker.py: connect()"]
-    C5["Adapter: connect and get subscriber"]
-
-    C6["Adapter Subscriber: subscribe()"]
-    C7["Adapter: receive message"]
-
-    C8["core/serializers.py: deserialize"]
-    C9["core/interfaces.py: Message reconstruction"]
-
-    C10["core/observability.py: after_consume middleware"]
-
-    C11["broker.py: wrapper(msg)"]
-    C12["schema.py: DataPacket creation"]
-
-    C13["broker.py: idempotency and validation"]
-    C14["broker.py: execute user handler"]
-
-    C15{"Reply required?"}
-    C16["broker.py: publish response"]
-    C17["Re-enter Producer Flow"]
-    C18["End"]
-
-    C1 --> C2 --> C3
-    C3 --> C4 --> C5
-    C5 --> C6 --> C7
-
-    C7 --> C8 --> C9 --> C10
-    C10 --> C11 --> C12
-    C12 --> C13 --> C14
-
-    C14 --> C15
-    C15 -- Yes --> C16 --> C17
-    C15 -- No --> C18
-end
-
-Q1 --> C7
+flowchart LR
+  A[Application Code] --> B[MessageBroker]
+  B --> C[DataPacket / ResponsePacket]
+  C --> D[Message Envelope]
+  D --> E[Middleware Hooks]
+  E --> F[Adapter Publisher/Subscriber]
+  F --> G[(Broker Transport)]
+  G --> F
+  F --> E
+  E --> H[User Handlers]
 ```
 
-## 📂 Folder Structure
+What happens step-by-step:
+
+- Application calls send_message or send_and_wait.
+- Broker builds packet metadata (including correlation_id).
+- Middleware before_publish runs.
+- Adapter serializes and publishes to the transport.
+- Subscriber receives and deserializes to Message.
+- Middleware after_consume runs.
+- Broker validates packet and invokes handler.
+- If reply_to exists, handler result is published as ResponsePacket.
+
+## Configuration
+
+Configuration can come from URI query params, keyword arguments, config mapping, and environment overrides.
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| timeout | int (ms) | 5000 | Operation timeout for transport actions. |
+| max_retries | int | 3 | Retry attempts for transport operations. |
+| concurrency | int | 10 | Number of consumer workers per subscription. |
+| max_queue_size | int | 100 | Internal bounded queue size for backpressure. |
+| processing_timeout_ms | int \| None | None | Max time allowed for one handler execution. |
+| handler_max_retries | int | 0 | Retry attempts for handler execution failures. |
+| scheduler_lock_ttl_ms | int | 5000 | Scheduler lock TTL for delayed delivery coordination. |
+| scheduler_batch_size | int | 100 | Batch size for scheduled message polling/moves. |
+| idempotency_ttl_sec | int | 86400 | TTL for idempotency keys used during processing. |
+| shutdown_drain_timeout_ms | int | 1500 | Grace period to drain queued work on shutdown. |
+| default_dlq_topic | str \| None | None | Fallback dead-letter queue destination. |
+| dlq_topics | dict[str, str] | {} | Per-topic dead-letter queue overrides. |
+| observers | list[object] | [] | Observer hooks for publish/consume/retry telemetry. |
+| middlewares | list[Middleware] | [] | Middleware chain for before/after message lifecycle hooks. |
+| serializer | Serializer | JsonSerializer | Custom serializer implementation for payload encoding/decoding. |
+| rabbitmq_delay_queue_prefix | str | broker.delay | Prefix used by RabbitMQ delayed queue strategy. |
+
+Example:
+
+```python
+from message_broker import MessageBroker
+
+broker = MessageBroker(
+  "redis://localhost:6379?timeout=3000",
+  queue_name="orders",
+  concurrency=20,
+  max_queue_size=500,
+  handler_max_retries=2,
+)
+```
+
+Environment override examples:
+
+- MB_TIMEOUT=7000
+- MB_MAX_RETRIES=5
+- MB_REDIS_TIMEOUT=2000
+
+## Middleware System
+
+Middleware exists to keep cross-cutting behavior out of business handlers and adapters.
+
+- before_publish(topic, message): runs before serialization/publish.
+- after_consume(topic, message): runs after deserialize and before handler invocation.
+
+Execution flow:
+
+- Publish path: MessageBroker -> before_publish (in order) -> adapter publish
+- Consume path: adapter receive -> deserialize -> after_consume (in order) -> user handler
+
+If a middleware raises during publish, publish fails fast. If a middleware raises during consume, the framework logs/continues according to adapter flow so one middleware does not stop all consumption.
+
+Small example:
+
+```python
+import time
+from message_broker.src.core.interfaces import Middleware, Message
+
+
+class TimingMiddleware(Middleware):
+  async def before_publish(self, topic: str, message: Message) -> Message:
+    message.metadata["submitted_at"] = time.time()
+    return message
+
+  async def after_consume(self, topic: str, message: Message) -> Message:
+    started = message.metadata.get("submitted_at")
+    if isinstance(started, (int, float)):
+      message.metadata["queue_latency_ms"] = (time.time() - started) * 1000
+    return message
+```
+
+## Extending the Framework
+
+To add a new broker adapter:
+
+1. Implement Broker, Publisher, and Subscriber contracts.
+2. Reuse context serializer and middleware chain.
+3. Register adapter factory with BrokerRegistry.register("scheme", factory).
+4. Optionally expose as plugin entry point group message_broker.adapters.
+5. Use URI scheme in MessageBroker("scheme://...").
+
+Minimal registration example:
+
+```python
+from message_broker.src.core.registry import BrokerRegistry
+
+
+BrokerRegistry.register("mybroker", lambda context: MyBroker(context))
+```
+
+## Folder Structure
 
 ```text
 message_broker/
-├── src/
-│   ├── adapters/
-│   │   ├── __init__.py
-│   │   └── redis.py            # Redis implementation
-│   │
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── context.py          # Connection parsing + config merging
-│   │   ├── exceptions.py       # Custom exceptions
-│   │   ├── interfaces.py       # Contracts (Publisher, Subscriber, Broker)
-│   │   ├── observability.py    # Middleware + tracing
-│   │   ├── registry.py         # Adapter registration system
-│   │   ├── resilience.py       # Retry logic
-│   │   └── serializers.py      # Serialization layer
-│   │
-│   ├── __init__.py
-│   ├── app_logging.py          # Logging setup
-│   ├── broker.py               # High-level API (MessageBroker)
-│   ├── cli_messager.py         # Example sender
-│   ├── cli_receiver.py         # Example receiver
-│   └── schema.py               # DataPacket / ResponsePacket
-│
+├── message_broker/
+│   ├── src/
+│   │   ├── adapters/
+│   │   │   ├── __init__.py
+│   │   │   ├── rabbit.py
+│   │   │   └── redis.py
+│   │   ├── core/
+│   │   │   ├── context.py
+│   │   │   ├── exceptions.py
+│   │   │   ├── interfaces.py
+│   │   │   ├── observability.py
+│   │   │   ├── registry.py
+│   │   │   ├── resilience.py
+│   │   │   └── serializers.py
+│   │   ├── app_logging.py
+│   │   ├── broker.py
+│   │   └── schema.py
+│   └── __init__.py
 ├── pyproject.toml
-├── README.md
-└── .gitignore
+├── requirements.txt
+└── Readme.md
 ```
 
----
+## Contributing / Notes for Maintainers
 
-# ⚙️ How It Works (Core Flow)
+Contributing guidelines:
 
-### 1. Context Creation
+1. Keep adapter behavior transport-specific but contract-compatible.
+2. Preserve async correctness and cancellation safety.
+3. Add tests for retries, timeout boundaries, and shutdown behavior.
+4. Document any new context options in this README.
 
-```python
-context = BrokerContext("redis://localhost:6379")
-```
+Notes for maintainers:
 
-* Parses URI
-* Merges config
-* Sets defaults
+- Adapter plug-in point: BrokerRegistry maps URI scheme/broker_name to factory functions.
+- Middleware hooks are executed by EnforcingPublisher on publish and by subscribers during consume before user handlers.
+- Registry lifecycle: create() triggers plugin discovery, then resolves from registered factories.
+- Adding a new broker usually requires:
+  implementing adapter classes, importing/registration in adapters package, optional plugin entry point, and coverage for connect/publish/subscribe/disconnect + delayed behavior.
 
----
+Operational note:
 
-### 2. Broker Resolution
-
-```python
-broker = BrokerRegistry.create(context)
-```
-
-* Finds correct adapter
-* Instantiates broker dynamically
-
----
-
-### 3. Publishing
-
-```python
-await publisher.publish("topic", message)
-```
-
-Flow:
-
-```
-Message → Middleware → Serializer → Adapter → Broker
-```
-
----
-
-### 4. Consuming
-
-```
-Broker → Adapter → Queue → Workers → Middleware → Handler
-```
-
-* Uses bounded queue → prevents overload
-* Workers process messages concurrently
-
----
-
-### 5. RPC (Request-Response)
-
-```
-send_and_wait()
-   ↓
-Temporary reply queue
-   ↓
-Correlation ID tracking
-   ↓
-Response matched automatically
-```
-
----
-
-# 📊 API Reference
-
-## 🔹 High-Level API (Recommended)
-
-| Function             | Description            | Example                           |
-| -------------------- | ---------------------- | --------------------------------- |
-| `MessageBroker(uri)` | Create broker instance | `MessageBroker("redis://...")`    |
-| `connect()`          | Connect to broker      | `await broker.connect()`          |
-| `start()`            | Start consuming        | `await broker.start()`            |
-| `send_message()`     | Send message           | `await broker.send_message(...)`  |
-| `send_and_wait()`    | RPC request-response   | `await broker.send_and_wait(...)` |
-| `on_message()`       | Register handler       | `@broker.on_message`              |
-| `on_reply()`         | Register reply handler | `@broker.on_reply`                |
-| `disconnect()`       | Graceful shutdown      | `await broker.disconnect()`       |
-
----
-
-## 🔹 Core API (Advanced)
-
-| Component        | Purpose                         |
-| ---------------- | ------------------------------- |
-| `BrokerContext`  | Parses config + manages options |
-| `BrokerRegistry` | Resolves adapters dynamically   |
-| `Message`        | Transport-neutral message       |
-| `Publisher`      | Sends messages                  |
-| `Subscriber`     | Consumes messages               |
-| `Serializer`     | Handles encoding/decoding       |
-| `Middleware`     | Inject cross-cutting logic      |
-
----
-
-# 🏗️ Advanced Usage
-
-## 🔁 Retry Configuration
-
-```python
-BrokerContext(
-    "redis://...",
-    max_retries=5
-)
-```
-
----
-
-## ⚡ Backpressure Control
-
-```python
-BrokerContext(
-    "redis://...",
-    concurrency=20,
-    max_queue_size=500
-)
-```
-
----
-
-## 🔍 Middleware Example
-
-```python
-from message_broker.src.core.observability import MetricsMiddleware
-
-BrokerContext(
-    "redis://...",
-    middlewares=[MetricsMiddleware()]
-)
-```
-
----
-
-## 🧠 Delayed Delivery
-
-```python
-from datetime import datetime, timedelta
-
-await broker.send_message(
-    content={"task": "sync"},
-    sender="scheduler",
-    deliver_at=datetime.utcnow() + timedelta(seconds=30),
-)
-```
-
----
-
-# 🔌 Extending the Framework
-
-## ➕ Add a New Broker
-
-### Step 1: Create adapter
-
-```text
-src/adapters/mybroker.py
-```
-
----
-
-### Step 2: Implement interfaces
-
-* `Publisher`
-* `Subscriber`
-* `Broker`
-
----
-
-### Step 3: Register adapter
-
-```python
-BrokerRegistry.register("mybroker", lambda ctx: MyBroker(ctx))
-```
-
----
-
-### Step 4: Use it
-
-```python
-MessageBroker("mybroker://localhost")
-```
-
----
-
-## ➖ Remove a Broker
-
-* Delete adapter file
-* Remove import
-* (Optional) unregister from registry
-
----
-
-## 🔄 Replace a Broker
-
-No code changes needed:
-
-```python
-# Switch from Redis → Another adapter
-MessageBroker("mybroker://localhost")
-```
-
----
-
-# 🧪 CLI Examples
-
-```bash
-python -m message_broker.cli_receiver
-python -m message_broker.cli_messager
-```
-
----
-
-# ⚙️ Configuration System
-
-Supports:
-
-* URI query params
-* kwargs
-* environment overrides
-
-```python
-BrokerContext(
-    "redis://localhost:6379?timeout=3000",
-    concurrency=10,
-    max_retries=3
-)
-```
+- MessageBroker.start() is a long-running task. In services, run it in a managed task and cancel on shutdown to trigger graceful disconnect.
