@@ -194,6 +194,53 @@ class Middleware(ABC):
             Any exception raised here will be logged but not crash the consume loop.
         """
 
+    async def before_publish_response(self, topic: str, message: Message) -> Message:
+        """Hook called before publishing response messages.
+
+        Default behavior delegates to `before_publish` for full backward
+        compatibility. Override this method when response packets need
+        different middleware behavior than request packets.
+        """
+
+        return await self.before_publish(topic, message)
+
+    async def after_consume_response(self, topic: str, message: Message) -> Message:
+        """Hook called after consuming response messages.
+
+        Default behavior delegates to `after_consume` for full backward
+        compatibility. Override this method when response packets need
+        different middleware behavior than request packets.
+        """
+
+        return await self.after_consume(topic, message)
+
+
+def resolve_packet_kind(message: Message) -> str:
+    """Classify message as request or response for middleware routing.
+
+    Resolution order:
+    1. `message.metadata["packet_type"]` when set to `request` or `response`.
+    2. Payload-shape inference for response envelopes.
+    3. Fallback to `request`.
+    """
+
+    packet_type = message.metadata.get("packet_type")
+    if isinstance(packet_type, str):
+        normalized = packet_type.strip().lower()
+        if normalized in {"request", "response"}:
+            return normalized
+
+    payload = message.payload
+    if isinstance(payload, Mapping):
+        if {
+            "correlation_id",
+            "in_response_to",
+            "status",
+        }.issubset(payload.keys()):
+            return "response"
+
+    return "request"
+
 
 class Publisher(ABC):
     """
@@ -270,6 +317,21 @@ class EnforcingPublisher(Publisher):
     def __init__(self, delegate: Publisher) -> None:
         self._delegate = delegate
 
+    async def _apply_before_publish_middlewares(self, topic: str, message: Message) -> Message:
+        """Apply request or response publish hooks based on packet kind."""
+
+        ctx = getattr(self._delegate, "_context", None)
+        if ctx is None or not getattr(ctx, "middlewares", None):
+            return message
+
+        packet_kind = resolve_packet_kind(message)
+        for middleware in ctx.middlewares:
+            if packet_kind == "response":
+                message = await middleware.before_publish_response(topic, message)
+            else:
+                message = await middleware.before_publish(topic, message)
+        return message
+
     async def publish(self, *args, **kwargs) -> None:
         """
         Flexible publish wrapper that accepts positional or keyword args.
@@ -302,10 +364,7 @@ class EnforcingPublisher(Publisher):
 
         # Wrap delayed messages into a transport-neutral scheduling envelope
         if deliver_at is not None:
-            ctx = getattr(self._delegate, "_context", None)
-            if ctx is not None and getattr(ctx, "middlewares", None):
-                for middleware in ctx.middlewares:
-                    message = await middleware.before_publish(topic, message)
+            message = await self._apply_before_publish_middlewares(topic, message)
 
             # The ScheduledEnvelope allows adapters to handle delayed delivery without mutating the original message metadata.
             envelope = ScheduledEnvelope(message=message, target=topic, deliver_at=deliver_at)
@@ -313,11 +372,8 @@ class EnforcingPublisher(Publisher):
             return
 
         # No special features requested — delegate directly
-        # Apply before_publish middleware from delegate's context if available
-        ctx = getattr(self._delegate, "_context", None)
-        if ctx is not None and getattr(ctx, "middlewares", None):
-            for middleware in ctx.middlewares:
-                message = await middleware.before_publish(topic, message)
+        # Apply middleware from delegate's context if available.
+        message = await self._apply_before_publish_middlewares(topic, message)
 
         await self._delegate.publish(topic, message, timeout_ms=timeout_ms, deliver_at=None)
 

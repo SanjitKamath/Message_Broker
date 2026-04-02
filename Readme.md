@@ -246,11 +246,22 @@ Middleware exists to keep cross-cutting behavior out of business handlers and ad
 
 - before_publish(topic, message): runs before serialization/publish.
 - after_consume(topic, message): runs after deserialize and before handler invocation.
+- before_publish_response(topic, message): response-specific publish hook.
+- after_consume_response(topic, message): response-specific consume hook.
+
+Default behavior:
+
+- If response-specific hooks are not overridden, they automatically fall back to
+  before_publish/after_consume for backward compatibility.
+- Messages are routed as request/response using metadata packet_type when present,
+  with payload-shape inference fallback for responses.
 
 Execution flow:
 
-- Publish path: MessageBroker -> before_publish (in order) -> adapter publish
-- Consume path: adapter receive -> deserialize -> after_consume (in order) -> user handler
+- Request publish path: MessageBroker -> before_publish (in order) -> adapter publish
+- Response publish path: MessageBroker -> before_publish_response (in order) -> adapter publish
+- Request consume path: adapter receive -> deserialize -> after_consume (in order) -> user handler
+- Response consume path: adapter receive -> deserialize -> after_consume_response (in order) -> reply handler / RPC waiter
 
 If a middleware raises during publish, publish fails fast. If a middleware raises during consume, the framework logs/continues according to adapter flow so one middleware does not stop all consumption.
 

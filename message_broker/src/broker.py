@@ -456,7 +456,10 @@ class MessageBroker:
                                 # If the publish fails, we want to make sure we enter the retry logic instead of
                                 await self._publisher.publish(
                                     data.reply_to,
-                                    Message(payload=response.model_dump(mode="json")),
+                                    Message(
+                                        payload=response.model_dump(mode="json"),
+                                        metadata={"packet_type": "response"},
+                                    ),
                                 )
                                 self.log.info(
                                     "Response published",
@@ -685,6 +688,7 @@ class MessageBroker:
         # We then wrap this DataPacket in a Message object, which is the format that the underlying adapter expects for publishing. 
         # We also add a "submitted_at" timestamp to the metadata for observability purposes.
         message = Message(payload=packet.model_dump(mode="json"))
+        message.metadata.setdefault("packet_type", "request")
         message.metadata.setdefault("submitted_at", time.time())
 
         # Counter for measuring how long the publish operation takes, which can be useful for logging and monitoring. 
@@ -884,7 +888,10 @@ class MessageBroker:
         )
         await self._publisher.publish(
             packet.reply_to,
-            Message(payload=failed.model_dump(mode="json")),
+            Message(
+                payload=failed.model_dump(mode="json"),
+                metadata={"packet_type": "response"},
+            ),
         )
 
     """

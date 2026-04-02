@@ -33,6 +33,7 @@ from ..core.interfaces import (
     Publisher,
     ScheduledEnvelope,
     Subscriber,
+    resolve_packet_kind,
 )
 from ..core.registry import BrokerRegistry
 from ..core.resilience import with_retries
@@ -244,9 +245,13 @@ class RabbitMQSubscriber(Subscriber):
                 message = self._deserialize(incoming.body)
                 message.metadata.setdefault("source_topic", topic)
 
+                packet_kind = resolve_packet_kind(message)
                 for middleware in self._context.middlewares:
                     try:
-                        message = await middleware.after_consume(topic, message)
+                        if packet_kind == "response":
+                            message = await middleware.after_consume_response(topic, message)
+                        else:
+                            message = await middleware.after_consume(topic, message)
                     except Exception:
                         continue
 

@@ -32,6 +32,7 @@ from ..core.interfaces import (
     Subscriber,
     ScheduledEnvelope,
     EnforcingPublisher,
+    resolve_packet_kind,
 )
 from ..core.registry import BrokerRegistry
 from ..core.resilience import with_retries
@@ -309,10 +310,14 @@ class RedisSubscriber(Subscriber):
             try:
                 message = await queue.get()
                 try:
-                    # Apply after_consume middleware hooks
+                    # Apply request/response consume middleware hooks
+                    packet_kind = resolve_packet_kind(message)
                     for middleware in self._context.middlewares:
                         try:
-                            message = await middleware.after_consume(topic, message)
+                            if packet_kind == "response":
+                                message = await middleware.after_consume_response(topic, message)
+                            else:
+                                message = await middleware.after_consume(topic, message)
                         except Exception:
                             logging.exception(
                                 "Error in after_consume middleware for topic: %s", topic
