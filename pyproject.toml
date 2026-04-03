@@ -1,37 +1,23 @@
 [project]
-name = "message_broker"
+name = "lyik_messaging"
 version = "0.1.0"
-description = "Modular, pluggable async message broker with delayed delivery and extensible adapters"
-readme = "Readme.md"
+description = "Minimal FastStream-based messaging library with strict typing and transparent AES-GCM support"
+readme = "README.md"
 requires-python = ">=3.10"
-authors = [ { name = "LYIK" } ]
-
+authors = [{ name = "LYIK" }]
 dependencies = [
-    "redis[asyncio]>=5.0.0",
-    "aio-pika>=9.4.0",
+    "faststream[rabbit,redis]>=0.6.7",
+    "cryptography>=42.0.0",
     "pydantic>=2.0.0",
-    "structlog>=24.1.0",
-    "colorama>=0.4.6",
-]
-
-[project.optional-dependencies]
-# Install with: pip install message_broker[otel]
-otel = [
-    "opentelemetry-api>=1.20.0"
-]
-
-[project.entry-points."message_broker.adapters"]
-redis = "message_broker.adapters.redis:redis_factory"
-rabbitmq = "message_broker.adapters.rabbit:rabbitmq_factory"
-
-[tool.setuptools]
-packages = [
-    "message_broker", 
-    "message_broker.src", 
-    "message_broker.src.core", 
-    "message_broker.src.adapters"
 ]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=69.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lyik_messaging*"]
