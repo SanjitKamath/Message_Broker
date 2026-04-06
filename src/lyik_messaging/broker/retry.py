@@ -8,7 +8,17 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
-    """Simple exponential-backoff retry policy."""
+    """
+    Simple exponential-backoff retry policy.
+    
+    Attributes:
+        `max_retries`: The maximum number of retry attempts before giving up.
+        `base_delay_ms`: The base delay in milliseconds for the first retry attempt, which will be multiplied exponentially 
+                        for subsequent attempts.
+        `max_delay_ms`: Optional maximum delay in milliseconds to cap the exponential backoff, preventing excessively long delays.
+        `jitter`: Whether to apply random jitter to the delay to help prevent thundering herd problems when multiple messages 
+                are retried at the same time.
+    """ 
 
     max_retries: int
     base_delay_ms: int = 100

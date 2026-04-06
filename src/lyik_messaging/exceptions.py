@@ -1,4 +1,4 @@
-"""Custom exceptions for :mod:`lyik_messaging`."""
+"""Custom exceptions for `lyik_messaging`."""
 
 from __future__ import annotations
 

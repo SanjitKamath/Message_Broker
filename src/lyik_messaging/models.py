@@ -1,4 +1,4 @@
-"""Pydantic models and contracts for :mod:`lyik_messaging`."""
+"""Pydantic models and contracts for `lyik_messaging`."""
 
 from __future__ import annotations
 

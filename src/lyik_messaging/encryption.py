@@ -1,4 +1,11 @@
-"""AES-GCM encryption support for :mod:`lyik_messaging`."""
+"""
+AES-GCM encryption support for `lyik_messaging`.
+
+This module provides AES-GCM encryption support for `lyik_messaging` by defining a FastStream middleware that can be applied to message handlers. 
+The middleware automatically encrypts outgoing messages and decrypts incoming messages based on the presence of a specific header. 
+The AES key is normalized from a user-supplied string and can be provided in various formats (hex, base64, or UTF-8 text). The module also includes 
+error handling for common encryption issues, such as invalid keys or decryption failures.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +26,11 @@ from faststream.response import BatchPublishCommand, PublishCommand
 
 from .exceptions import ConfigurationError, EncryptionError
 
+"""
+Type checking imports are placed inside an `if TYPE_CHECKING` block to avoid circular imports and reduce runtime overhead.
+This allows us to reference types from other modules (like `ContextRepo`) without actually importing them at runtime, 
+which can help prevent issues with circular dependencies and improve performance.
+"""
 if TYPE_CHECKING:
     from faststream._internal.context.repository import ContextRepo
 
@@ -35,6 +47,7 @@ def normalize_aes_key(aes_key: str) -> bytes:
     if not key:
         raise ConfigurationError("aes_key must not be empty.")
 
+    # We attempt to decode the key using multiple strategies: hex, base64, and UTF-8 text.
     for decoder in (bytes.fromhex, _decode_base64, lambda value: value.encode("utf-8")):
         try:
             candidate = decoder(key)  # type: ignore[arg-type]
@@ -51,6 +64,7 @@ def normalize_aes_key(aes_key: str) -> bytes:
 def build_aesgcm_middleware_factory(aes_key: bytes) -> Callable[[object | None], "AesGcmMiddleware"]:
     """Create a FastStream middleware factory that closes over the AES key."""
 
+    # This function returns a factory function that creates instances of `AesGcmMiddleware` with the provided AES key. 
     def factory(msg: object | None, /, *, context: "ContextRepo") -> AesGcmMiddleware:
         return AesGcmMiddleware(msg, context=context, aes_key=aes_key)
 
@@ -58,7 +72,14 @@ def build_aesgcm_middleware_factory(aes_key: bytes) -> Callable[[object | None],
 
 
 class AesGcmMiddleware(BaseMiddleware[object, object]):
-    """FastStream middleware that encrypts outbound payloads and decrypts inbound ones."""
+    """
+    FastStream middleware that encrypts outbound payloads and decrypts inbound ones.
+    
+    This middleware checks for the presence of a specific header to determine whether to encrypt or decrypt messages. 
+    It uses AES-GCM for encryption, which provides both confidentiality and integrity. The middleware handles
+    both single messages and batch messages, ensuring that all payloads are processed correctly. 
+    It also includes error handling for common encryption issues.
+    """
 
     def __init__(self, msg: object | None, /, *, context: "ContextRepo", aes_key: bytes) -> None:
         super().__init__(msg, context=context)

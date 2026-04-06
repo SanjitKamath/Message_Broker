@@ -1,4 +1,4 @@
-"""Utility helpers for :mod:`lyik_messaging`."""
+"""Utility helpers for `lyik_messaging`."""
 
 from __future__ import annotations
 

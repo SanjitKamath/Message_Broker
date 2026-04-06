@@ -1,15 +1,10 @@
-# Core dependencies
-
+# Core
 faststream[rabbit,redis]>=0.6.7
 cryptography>=42.0.0
 pydantic>=2.0.0
 
 # Dev (optional)
-
-# pytest
-
-# black
-
-# ruff
-
-# mypy
+pytest
+black
+ruff
+mypy

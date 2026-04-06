@@ -1,15 +1,46 @@
 [project]
 name = "lyik_messaging"
 version = "0.1.0"
-description = "Minimal FastStream-based messaging library with strict typing and transparent AES-GCM support"
+description = "Typed, transport-agnostic messaging library with strict handlers, request/reply support, and optional AES-GCM encryption"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [{ name = "LYIK" }]
+maintainers = [{ name = "LYIK" }]
+keywords = [
+    "messaging",
+    "message-broker",
+    "event-driven",
+    "request-response",
+    "rabbitmq",
+    "redis",
+    "faststream",
+    "pydantic",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+]
 dependencies = [
     "faststream[rabbit,redis]>=0.6.7",
     "cryptography>=42.0.0",
     "pydantic>=2.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/<your-repo>"
+Repository = "https://github.com/<your-repo>"
 
 [build-system]
 requires = ["setuptools>=69.0", "wheel"]

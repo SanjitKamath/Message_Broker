@@ -22,7 +22,15 @@ if TYPE_CHECKING:
     from .internal_types import FastStreamBroker, ReplyHandler, StrictMessageHandler
 
 class ConsumerService:
-    """Encapsulates strict consumer registration and execution."""
+    """
+    Encapsulates strict consumer registration and execution.
+    
+    This service manages the registration of strict message handlers for specific queues, ensuring that only one handler is 
+    registered per queue. It also provides a mechanism for registering a reply handler for processing responses on the
+    broker's reply queue. The service handles the attachment of registered handlers to the broker when it is initialized 
+    and provides wrapper functions that implement the strict execution pipeline, including payload decoding, middleware 
+    application, and retry logic for user handlers.
+    """
 
     def __init__(self, broker_owner: "MessageBroker") -> None:
         self._owner = broker_owner
@@ -34,7 +42,21 @@ class ConsumerService:
         payload_model: type[BaseModel],
         handler: "StrictMessageHandler",
     ) -> None:
-        """Register a strict `(payload, info)` handler for a queue."""
+        """
+        Register a strict `(payload, info)` handler for a queue.
+        
+        Each queue can only have one strict handler, and attempts to register multiple handlers for the same queue will raise a
+        `ConfigurationError`. The handler will be wrapped in a function that implements the strict execution pipeline, which 
+        includes:
+        1. Decoding the incoming message and validating it against the declared `payload_model`.
+        2. Applying any registered consume middlewares to the message before it reaches the user handler.
+        3. Executing the user handler with the decoded payload and message info, with retry logic based on the configured `RetryPolicy`.
+        4. Sending a response back to the `reply_to` address if it is provided in the incoming message, with the result of the handler execution
+              or error information if an exception occurs.
+    
+        The wrapper function is automatically subscribed to the broker when it is initialized, and any subsequent 
+        registrations will also be subscribed immediately if the broker is already running.
+        """
         owner = self._owner
         if queue in owner._registered_queues:
             raise ConfigurationError(
@@ -57,7 +79,18 @@ class ConsumerService:
         self,
         handler: "ReplyHandler",
     ) -> "Callable[..., Awaitable[None]]":
-        """Register a reply callback on the broker reply queue."""
+        """
+        Register a reply callback on the broker reply queue.
+        
+        This method registers a handler function that will be called for any messages received on the broker's reply queue. 
+        The handler is wrapped in a function that applies consume middlewares and normalizes the incoming message into a 
+        `ResponsePacket` before invoking the user handler.
+
+        The wrapper function is automatically subscribed to the broker's reply queue when it is initialized, and if the broker is
+        already running, it will be subscribed immediately. The method returns the wrapper function for potential use in testing 
+        or other contexts.
+
+        """
 
         owner = self._owner
         wrapper = self._build_reply_wrapper(handler)
