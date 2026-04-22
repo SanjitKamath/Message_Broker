@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import threading
+import logging
 import time
 import uuid
 import warnings
@@ -25,15 +25,21 @@ from ..exceptions import (
     PublishFailedError,
 )
 from ..models import DataPacket, Message, Payload, ResponsePacket
-from .delay_strategies import DelayStrategy, RabbitMQDelayStrategy, RedisDelayStrategy
+from .delay_strategies import (
+    REDIS_RESPONSE_STORE_KEY,
+    DelayStrategy,
+    RabbitMQDelayStrategy,
+    RedisDelayStrategy,
+    resolve_redis_client,
+)
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
     from collections.abc import Mapping
 
     from . import MessageBroker
-
-StoredResponse: TypeAlias = tuple[ResponsePacket, float]
 
 
 class PublisherService:
@@ -42,19 +48,17 @@ class PublisherService:
     
     This service is used internally by `MessageBroker` to implement high-level publish and request/response patterns,
     including `send_message`, `send_and_wait`, and `send_and_store`. It also provides a low-level `publish` method 
-    for advanced use cases. The service manages an optional in-memory response store for `send_and_store` operations, 
-    with TTL-based cleanup to prevent unbounded memory growth.
+    for advanced use cases. The service uses Redis hashes for response storage with a consume-once pattern - responses
+    are deleted after retrieval to prevent duplicate processing.
     """
 
-    def __init__(self, broker_owner: "MessageBroker", *, response_store_ttl_seconds: float | None) -> None:
+    def __init__(
+        self,
+        broker_owner: "MessageBroker",
+    ) -> None:
         self._owner = broker_owner
         self._rabbit_delay_strategy = RabbitMQDelayStrategy()
         self._redis_delay_strategy = RedisDelayStrategy()
-        # In-memory response cache for send_and_store/get_response.
-        # Thread lock keeps reads/writes safe across threads and async tasks.
-        self._response_store_ttl_seconds = response_store_ttl_seconds
-        self._response_store: dict[str, StoredResponse] = {}
-        self._response_store_lock = threading.Lock()
 
     async def send_message(
         self,
@@ -342,7 +346,11 @@ class PublisherService:
         timeout: float,
         deliver_at: datetime | None = None,
     ) -> str:
-        """Send a request/response message and store the response for later retrieval."""
+        """Send a request/response message and store the response for later retrieval.
+
+        The response can only be retrieved once using `get_response()`. After retrieval,
+        the response is deleted from storage (consume-once pattern).
+        """
 
         response = await self.send_and_wait(
             content=content,
@@ -350,24 +358,47 @@ class PublisherService:
             timeout=timeout,
             deliver_at=deliver_at,
         )
-        # response_id intentionally differs from correlation_id so callers can treat
-        # storage retrieval as an independent lookup concern.
         response_id = uuid.uuid4().hex
-        with self._response_store_lock:
-            self._cleanup_expired_locked()
-            self._response_store[response_id] = (response, time.monotonic())
+        redis_client = resolve_redis_client(self._owner._broker)
+        if redis_client is not None:
+            await redis_client.hset(
+                REDIS_RESPONSE_STORE_KEY,
+                response_id,
+                response.model_dump_json(),
+            )
+        else:
+            warnings.warn(
+                "Redis not configured - response will not be stored for later retrieval. "
+                "Call connect() first or use send_and_wait() instead.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return response_id
 
-    def get_response(self, response_id: str) -> ResponsePacket | None:
-        """Return a stored response by id, or `None` if missing."""
+    async def get_response(self, response_id: str) -> ResponsePacket | None:
+        """Return a stored response by id and delete it, or `None` if missing.
 
-        with self._response_store_lock:
-            self._cleanup_expired_locked()
-            entry = self._response_store.get(response_id)
-            if entry is None:
-                return None
-            response, _stored_at = entry
-            return response
+        Note:
+            - The response can only be retrieved once. After retrieval, it is deleted.
+            - Returns `None` if Redis is not configured, the response was not found,
+              or if the stored data could not be parsed.
+        """
+
+        redis_client = resolve_redis_client(self._owner._broker)
+        if redis_client is None:
+            return None
+        stored = await redis_client.hget(REDIS_RESPONSE_STORE_KEY, response_id)
+        if stored is None:
+            logger.debug(f"Response not found in storage: {response_id}")
+            return None
+        try:
+            response = ResponsePacket.model_validate_json(stored)
+        except ValidationError:
+            logger.warning(f"Failed to parse stored response: {response_id}")
+            return None
+        await redis_client.hdel(REDIS_RESPONSE_STORE_KEY, response_id)
+        logger.debug(f"Retrieved and deleted response: {response_id}")
+        return response
 
     async def publish(
         self,
@@ -597,19 +628,3 @@ class PublisherService:
             status="processed",
             content=cast("Payload", payload),
         )
-
-    def _cleanup_expired_locked(self) -> None:
-        """
-        Remove expired entries from the in-memory response store based on the configured TTL. This method should be called
-        while holding the `_response_store_lock` to ensure thread safety. It checks the current time
-        against the stored timestamp of each response and removes any entries that have exceeded the TTL, preventing unbounded
-        memory growth from stale responses.
-        """
-        ttl = self._response_store_ttl_seconds
-        if ttl is None:
-            return
-
-        now = time.monotonic()
-        expired_ids = [response_id for response_id, (_response, stored_at) in self._response_store.items() if now - stored_at > ttl]
-        for response_id in expired_ids:
-            self._response_store.pop(response_id, None)

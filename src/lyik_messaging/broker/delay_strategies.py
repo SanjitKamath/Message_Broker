@@ -6,12 +6,15 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Protocol, cast
+from typing import Protocol, TypeAlias, cast
 
 from ..exceptions import ConfigurationError
 
 REDIS_DELAYED_ZSET_KEY = "lyik:delayed"
+REDIS_RESPONSE_STORE_KEY = "lyik:response_store"
 REDIS_DELAY_POLL_INTERVAL_SECONDS = 0.2
+
+_RedisHashClient: TypeAlias = object
 
 
 class DelayStrategy(Protocol):
@@ -177,6 +180,46 @@ def _is_redis_zset_client(client: object) -> bool:
         and hasattr(client, "zrangebyscore")
         and hasattr(client, "zrem")
     )
+
+
+def _is_redis_hash_client(client: object) -> bool:
+    """
+    Returns True if the given client object supports the necessary Redis hash operations
+    (hset, hget, hgetall, hdel) for implementing response storage.
+    """
+    return (
+        client is not None
+        and hasattr(client, "hset")
+        and hasattr(client, "hget")
+        and hasattr(client, "hgetall")
+        and hasattr(client, "hdel")
+    )
+
+
+def resolve_redis_client(broker: object) -> _RedisHashClient | None:
+    """
+    Attempts to resolve a Redis client from the broker instance by checking common attributes
+    where a Redis client might be stored. This is necessary because different broker 
+    implementations may store their Redis client in different ways.
+    The function checks for attributes like "_connection", "connection", "_redis", "redis",
+    "_client", and "client" and verifies if any of them support the required hash 
+    operations for response storage.
+    """
+    candidates = (
+        getattr(broker, "_connection", None),
+        getattr(broker, "connection", None),
+        getattr(broker, "_redis", None),
+        getattr(broker, "redis", None),
+        getattr(broker, "_client", None),
+        getattr(broker, "client", None),
+    )
+    for candidate in candidates:
+        if _is_redis_hash_client(candidate):
+            return cast("_RedisHashClient", candidate)
+        nested = getattr(candidate, "_connection", None) if candidate is not None else None
+        if _is_redis_hash_client(nested):
+            return cast("_RedisHashClient", nested)
+    return None
 
 
 def _utc_now_ms() -> int:

@@ -120,11 +120,6 @@ class MessageBroker:
             jitter=bool(self._context_options.get("retry_jitter", False)),
         )
 
-        # Optional TTL for stored responses in request/reply flows, with validation.
-        self._response_store_ttl_seconds = _coerce_optional_positive_float(
-            self._context_options.get("response_store_ttl_seconds")
-        )
-
         # Validate and initialize middlewares from context options, ensuring they are proper Middleware instances.
         middleware_option = self._context_options.get("middlewares", [])
         if not isinstance(middleware_option, list):
@@ -189,12 +184,9 @@ class MessageBroker:
         # Keep orchestration thin: lifecycle/publish/consume concerns live in services.
         self._core = BrokerCore(self)
 
-        # Publisher and consumer services handle the details of message publishing and consumption, 
+        # Publisher and consumer services handle the details of message publishing and consumption,
         # allowing the main broker class to focus on orchestration and providing a clean API.
-        self._publisher = PublisherService(
-            self,
-            response_store_ttl_seconds=self._response_store_ttl_seconds,
-        )
+        self._publisher = PublisherService(self)
 
         # Consumer service manages message handlers, including strict handlers for specific queues and the 
         # reply handler for request/reply patterns.
@@ -600,7 +592,7 @@ class MessageBroker:
                     )
                     print(f"Message sent with response ID: {response_id}")
                     # ... do other work ...
-                    response = broker.get_response(response_id)
+                    response = await broker.get_response(response_id)
                     if response:
                         print(f"Retrieved response: {response.payload}")
                     else:
@@ -639,7 +631,7 @@ class MessageBroker:
             deliver_at=deliver_at,
         )
 
-    def get_response(self, response_id: str) -> ResponsePacket | None:
+    async def get_response(self, response_id: str) -> ResponsePacket | None:
         """
         Retrieve a response previously stored with `send_and_store`.
         
@@ -672,7 +664,7 @@ class MessageBroker:
                     )
                     print(f"Message sent with response ID: {response_id}")
                     # ... do other work ...
-                    response = broker.get_response(response_id)
+                    response = await broker.get_response(response_id)
                     if response:
                         print(f"Retrieved response: {response.payload}")
                     else:
@@ -684,7 +676,7 @@ class MessageBroker:
         """
         # Delegate the retrieval logic to the PublisherService, which manages the storage of responses and can return the
         # associated ResponsePacket for the given response ID, or None if it is not available.
-        return self._publisher.get_response(response_id)
+        return await self._publisher.get_response(response_id)
 
     async def publish(
         self,
@@ -1014,16 +1006,6 @@ def _coerce_optional_positive_int(value: object) -> int | None:
     if not isinstance(value, int) or value <= 0:
         return None
     return value
-
-
-def _coerce_optional_positive_float(value: object) -> float | None:
-    """Coerce a value to an optional positive float, returning None if invalid."""
-
-    if value is None:
-        return None
-    if not isinstance(value, (int, float)) or float(value) <= 0.0:
-        return None
-    return float(value)
 
 
 async def _noop_reply_handler(_response: ResponsePacket) -> None:

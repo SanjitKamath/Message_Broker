@@ -251,7 +251,7 @@ Return value:
 Example:
 
 ```python
-stored = broker.get_response(response_id)
+stored = await broker.get_response(response_id)
 if stored:
     print(stored.content)
 ```
